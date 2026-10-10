@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>登录 · 智能订单客服</title>
+    <script src="https://cdn.jsdelivr.net/npm/vue@2.7.14/dist/vue.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+        }
+
+        body {
+            height: 100vh;
+            width: 100vw;
+            overflow: hidden;
+            background-image: url('https://images.unsplash.com/photo-1506744038136-46273834b3fb?q=80&w=2940&auto=format&fit=crop');
+            background-size: cover;
+            background-position: center;
+            background-repeat: no-repeat;
+            background-attachment: fixed;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        #app {
+            width: 440px;
+            max-width: 96vw;
+            border-radius: 32px;
+            background: rgba(255, 255, 255, 0.82);
+            backdrop-filter: blur(18px) saturate(180%);
+            -webkit-backdrop-filter: blur(18px) saturate(180%);
+            box-shadow: 0 30px 50px -15px rgba(0, 0, 0, 0.15), 0 0 0 1px rgba(255, 255, 255, 0.8) inset;
+            border: 1px solid rgba(255, 255, 255, 0.9);
+            padding: 42px 36px 36px;
+        }
+
+        .brand {
+            text-align: center;
+            margin-bottom: 28px;
+        }
+
+        .brand .icon {
+            font-size: 2.4rem;
+            margin-bottom: 10px;
+        }
+
+        .brand h1 {
+            font-size: 1.45rem;
+            font-weight: 650;
+            color: #0f2b4a;
+            letter-spacing: -0.02em;
+        }
+
+        .brand p {
+            margin-top: 8px;
+            font-size: 0.9rem;
+            color: #4a6a8b;
+        }
+
+        .form-group {
+            margin-bottom: 18px;
+        }
+
+        .form-group label {
+            display: block;
+            font-size: 0.85rem;
+            font-weight: 500;
+            color: #1e3a5f;
+            margin-bottom: 8px;
+        }
+
+        .form-group input {
+            width: 100%;
+            border: 1px solid rgba(185, 214, 255, 0.8);
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 16px;
+            padding: 14px 18px;
+            font-size: 0.95rem;
+            color: #0f2b4a;
+            outline: none;
+            transition: all 0.2s;
+        }
+
+        .form-group input:focus {
+            border-color: #93c5fd;
+            box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.12);
+        }
+
+        .form-group input::placeholder {
+            color: #94a3b8;
+        }
+
+        .code-row {
+            display: flex;
+            gap: 10px;
+        }
+
+        .code-row input {
+            flex: 1;
+        }
+
+        .code-btn {
+            flex-shrink: 0;
+            border: 1px solid rgba(185, 214, 255, 0.9);
+            background: rgba(255, 255, 255, 0.95);
+            color: #2563eb;
+            font-weight: 600;
+            font-size: 0.88rem;
+            padding: 0 16px;
+            border-radius: 16px;
+            cursor: pointer;
+            white-space: nowrap;
+            transition: all 0.2s;
+            min-width: 118px;
+        }
+
+        .code-btn:hover:not(:disabled) {
+            background: #ffffff;
+            box-shadow: 0 6px 14px rgba(59, 130, 246, 0.12);
+        }
+
+        .code-btn:disabled {
+            color: #94a3b8;
+            cursor: not-allowed;
+            opacity: 0.75;
+        }
+
+        .submit-btn {
+            width: 100%;
+            margin-top: 8px;
+            background: #3b82f6;
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            color: white;
+            font-weight: 600;
+            font-size: 1rem;
+            padding: 14px 20px;
+            border-radius: 40px;
+            cursor: pointer;
+            transition: all 0.2s;
+            box-shadow: 0 10px 18px -8px #3b82f6;
+        }
+
+        .submit-btn:hover:not(:disabled) {
+            background: #2563eb;
+            transform: translateY(-1px);
+        }
+
+        .submit-btn:disabled {
+            opacity: 0.65;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .msg {
+            margin-top: 16px;
+            padding: 12px 16px;
+            border-radius: 14px;
+            font-size: 0.88rem;
+            line-height: 1.5;
+            text-align: center;
+        }
+
+        .msg.error {
+            background: rgba(254, 226, 226, 0.9);
+            color: #b91c1c;
+            border: 1px solid rgba(252, 165, 165, 0.6);
+        }
+
+        .msg.ok {
+            background: rgba(220, 252, 231, 0.95);
+            color: #166534;
+            border: 1px solid rgba(134, 239, 172, 0.6);
+        }
+
+        .tip {
+            margin-top: 18px;
+            text-align: center;
+            font-size: 0.8rem;
+            color: #64748b;
+        }
+    </style>
+</head>
+<body>
+<div id="app">
+    <div class="brand">
+        <div class="icon">🛒</div>
+        <h1>智能订单客服</h1>
+        <p>邮箱验证码登录后开始对话</p>
+    </div>
+
+    <div class="form-group">
+        <label>邮箱</label>
+        <input
+            type="email"
+            v-model.trim="email"
+            placeholder="请输入注册邮箱"
+            @keyup.enter="submit"
+            :disabled="loading"
+        >
+    </div>
+
+    <div class="form-group">
+        <label>验证码</label>
+        <div class="code-row">
+            <input
+                type="text"
+                v-model.trim="code"
+                placeholder="4 位验证码"
+                maxlength="6"
+                @keyup.enter="submit"
+                :disabled="loading"
+            >
+            <button class="code-btn" type="button" @click="sendCode" :disabled="!canSendCode">
+                {{ countdown > 0 ? countdown + 's 后重发' : '获取验证码' }}
+            </button>
+        </div>
+    </div>
+
+    <button class="submit-btn" type="button" @click="submit" :disabled="loading">
+        {{ loading ? '登录中…' : '登录并进入客服' }}
+    </button>
+
+    <div v-if="message" class="msg" :class="messageType">{{ message }}</div>
+    <p class="tip">登录成功后会自动创建会话（user_id + session_id）</p>
+</div>
+
+<script>
+    new Vue({
+        el: '#app',
+        data: {
+            email: '',
+            code: '',
+            loading: false,
+            countdown: 0,
+            timer: null,
+            message: '',
+            messageType: 'ok',
+        },
+        computed: {
+            canSendCode() {
+                return !this.loading && this.countdown === 0 && !!this.email.trim();
+            },
+        },
+        mounted() {
+            if (location.protocol === 'file:') {
+                this.showMsg('请通过服务访问：http://127.0.0.1:8001/login （不要直接双击打开 HTML）', 'error');
+                return;
+            }
+            // 已登录则直接进聊天页
+            const userId = sessionStorage.getItem('user_id');
+            const sessionId = sessionStorage.getItem('session_id');
+            if (userId && sessionId) {
+                window.location.href = '/chat';
+            }
+        },
+        beforeDestroy() {
+            if (this.timer) clearInterval(this.timer);
+        },
+        methods: {
+            showMsg(text, type) {
+                this.message = text;
+                this.messageType = type || 'ok';
+            },
+            async parseJson(res) {
+                const text = await res.text();
+                try {
+                    return JSON.parse(text);
+                } catch (e) {
+                    throw new Error('接口返回非 JSON（HTTP ' + res.status + '）：' + text.slice(0, 120));
+                }
+            },
+            startCountdown(seconds) {
+                this.countdown = seconds;
+                if (this.timer) clearInterval(this.timer);
+                this.timer = setInterval(() => {
+                    this.countdown -= 1;
+                    if (this.countdown <= 0) {
+                        this.countdown = 0;
+                        clearInterval(this.timer);
+                        this.timer = null;
+                    }
+                }, 1000);
+            },
+            async sendCode() {
+                const email = this.email.trim();
+                if (!email) {
+                    this.showMsg('请先填写邮箱', 'error');
+                    return;
+                }
+                if (location.protocol === 'file:') {
+                    this.showMsg('请用 http://127.0.0.1:8001/login 打开本页，再点获取验证码', 'error');
+                    return;
+                }
+                this.loading = true;
+                this.showMsg('');
+                try {
+                    const res = await fetch('/sendEmail?email=' + encodeURIComponent(email));
+                    const data = await this.parseJson(res);
+                    if (data.code !== 200) {
+                        this.showMsg(data.msg || '验证码发送失败', 'error');
+                        return;
+                    }
+                    this.showMsg(data.msg || '验证码已发送，请查收邮件（60 秒内有效）', 'ok');
+                    this.startCountdown(60);
+                } catch (e) {
+                    console.error(e);
+                    this.showMsg('请求失败：' + (e && e.message ? e.message : '无法连接后端，请确认服务已在 8001 启动'), 'error');
+                } finally {
+                    this.loading = false;
+                }
+            },
+            async submit() {
+                const email = this.email.trim();
+                const code = this.code.trim();
+                if (!email) {
+                    this.showMsg('请填写邮箱', 'error');
+                    return;
+                }
+                if (!code) {
+                    this.showMsg('请填写验证码', 'error');
+                    return;
+                }
+                if (location.protocol === 'file:') {
+                    this.showMsg('请用 http://127.0.0.1:8001/login 打开本页', 'error');
+                    return;
+                }
+
+                this.loading = true;
+                this.showMsg('正在校验验证码…', 'ok');
+
+                try {
+                    // 1) 校验验证码 → 拿到 user_id
+                    const loginRes = await fetch('/checkCode', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ email: email, code: code }),
+                    });
+                    const loginData = await this.parseJson(loginRes);
+                    if (loginData.code !== 200 || !loginData.data || loginData.data.user_id == null) {
+                        this.showMsg(loginData.msg || '验证码校验失败', 'error');
+                        return;
+                    }
+
+                    // 统一存字符串，避免与 Redis 归属校验类型不一致
+                    const userId = String(loginData.data.user_id);
+
+                    // 2) 一体创建会话 → 拿到 session_id
+                    this.showMsg('验证成功，正在创建会话…', 'ok');
+                    const sessRes = await fetch('/create_session', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ user_id: userId }),
+                    });
+                    const sessData = await this.parseJson(sessRes);
+                    if (sessData.code !== 200 || !sessData.data) {
+                        this.showMsg(sessData.msg || '会话创建失败', 'error');
+                        return;
+                    }
+
+                    const sessionId = String(sessData.data);
+
+                    // 3) 持久化后跳转聊天页
+                    sessionStorage.setItem('user_id', userId);
+                    sessionStorage.setItem('session_id', sessionId);
+                    sessionStorage.setItem('user_email', email);
+
+                    this.showMsg('登录成功，正在进入客服…', 'ok');
+                    window.location.href = '/chat';
+                } catch (e) {
+                    console.error(e);
+                    this.showMsg('登录失败：' + (e && e.message ? e.message : '无法连接后端'), 'error');
+                } finally {
+                    this.loading = false;
+                }
+            },
+        },
+    });
+</script>
+</body>
+</html>

@@ -1,0 +1,1 @@
+print([hex(ord(c)) for c in "{user_id}"])
