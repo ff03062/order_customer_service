@@ -1,3 +1,7 @@
+from app.agent.node.order_query.node.query_rewrite_node import (
+    query_rewrite_node,
+    rewrite_question,
+)
 from app.agent.node.order_query.node.intent_classify_node import intent_classify_node
 from app.agent.node.order_query.node.schema_select_node import schema_select_node
 from app.agent.node.order_query.node.sql_generate_node import sql_generate_node
@@ -6,6 +10,8 @@ from app.agent.node.order_query.node.sql_execute_node import sql_execute_node
 from app.agent.node.order_query.node.answer_translate_node import answer_translate_node
 
 __all__ = [
+    "query_rewrite_node",
+    "rewrite_question",
     "intent_classify_node",
     "schema_select_node",
     "sql_generate_node",

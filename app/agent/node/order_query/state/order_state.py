@@ -35,6 +35,13 @@ class OrderQueryState(TypedDict):
     user_input: str
     user_id: str
 
+    # === 上下文（由主图 order_node 注入，用于省略指代消解）===
+    chat_history: list           # 最近几轮对话（LangChain Message 对象列表）
+    last_order_id: str           # 上一轮解析出的订单号（来自主图 current_order_id）
+    order_context: str           # 上一轮在聊什么
+    rewritten_input: str         # query_rewrite_node 改写后的自包含问题
+    resolved_order_ids: list     # 本次查询实际命中的订单号（供主图回写）
+
     # === 中间产物 ===
     intent: str                  # "query_orders" | "query_order_items" | "query_logistics" | "query_after_sales" | "query_products" | "chitchat"
     relevant_tables: list[str]   # 例如 ["orders", "logistics"]

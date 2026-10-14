@@ -6,13 +6,24 @@
 
     subgraph = OrderQuerySubGraph(checkpoint)
     subgraph.draw()
-    result = subgraph.invoke({"user_input": "我的订单", "user_id": "1"})
+    result = subgraph.invoke({
+        "user_input": "那它到哪了",              # 本轮用户原话
+        "user_id": "1",
+        "chat_history": [...],                  # 最近几轮消息（可选）
+        "last_order_id": "202609280001",        # 上一轮订单号（可选）
+        "order_context": "查询该订单物流",       # 上一轮话题（可选）
+    })
     print(result["answer"])
+
+上下文相关字段说明（由主图 order_node 注入）：
+    - chat_history / last_order_id / order_context 供 query_rewrite_node 消解省略指代
+    - resolved_order_ids 由 sql_execute_node 产出，主图据此回写 current_order_id
 """
 from langgraph.graph import StateGraph, START, END
 
 from app.agent.node.order_query.state import OrderQueryState
 from app.agent.node.order_query.node import (
+    query_rewrite_node,
     intent_classify_node,
     schema_select_node,
     sql_generate_node,
@@ -50,6 +61,8 @@ class OrderQuerySubGraph:
     拓扑：
       START
         ↓
+      query_rewrite_node        → 结合 chat_history + last_order_id 消解省略指代
+        ↓                         （无指代时不调用模型，直接透传）
       intent_classify_node      → 判断查询类型（订单/物流/售后...）
         ↓
       schema_select_node        → 根据意图裁剪相关表字段
@@ -60,7 +73,7 @@ class OrderQuerySubGraph:
         ↓                       ├─ invalid_json / empty / dangerous / no_user_id → sql_generate_node（重试）
         │                       ├─ exhausted → answer_translate_node
         │                       └─ pass → sql_execute_node
-      sql_execute_node          → 执行 SQL
+      sql_execute_node          → 执行 SQL，回收 resolved_order_ids
         ↓                       ├─ db_error → sql_generate_node（重试）
         │                       └─ 成功 → answer_translate_node
       answer_translate_node     → 状态翻译 + 兜底
@@ -75,6 +88,7 @@ class OrderQuerySubGraph:
     def get_agent(self):
         graph = StateGraph(OrderQueryState)
 
+        graph.add_node("query_rewrite_node", query_rewrite_node)
         graph.add_node("intent_classify_node", intent_classify_node)
         graph.add_node("schema_select_node", schema_select_node)
         graph.add_node("sql_generate_node", sql_generate_node)
@@ -82,7 +96,8 @@ class OrderQuerySubGraph:
         graph.add_node("sql_execute_node", sql_execute_node)
         graph.add_node("answer_translate_node", answer_translate_node)
 
-        graph.add_edge(START, "intent_classify_node")
+        graph.add_edge(START, "query_rewrite_node")
+        graph.add_edge("query_rewrite_node", "intent_classify_node")
         graph.add_edge("intent_classify_node", "schema_select_node")
         graph.add_edge("schema_select_node", "sql_generate_node")
         graph.add_edge("sql_generate_node", "sql_check_node")

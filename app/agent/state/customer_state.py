@@ -28,7 +28,10 @@ class CustomerServiceState(TypedDict):
     detail: str  # 意图判断依据或补充信息
 
     # ===== 订单查询相关 =====
-    current_order_id: str | None  # 当前正在查的订单
+    # 说明：current_order_id / order_context 是「无 reducer 的标量通道」，
+    # 本轮输入没传时自动保留上一轮 checkpoint 的值 —— 这正是跨轮追问得以成立的基础。
+    current_order_id: str | None  # 当前正在查的订单（订单/售后子图共用）
+    current_order_ids: list[str]  # 会话中出现过的订单号（去重保序，最多 5 个）
     order_context: str  # 上下文描述，如"用户在查第3个订单，金额299元"
     sql: str  # 当前生成的 SQL（最新一次）
     sql_attempts: Annotated[list[str], operator.add]  # 每次尝试的 SQL（含失败的），便于调试
@@ -37,6 +40,9 @@ class CustomerServiceState(TypedDict):
 
     # ===== 售后咨询相关 =====
     retrieved_policies: list[str]  # rag 检索到的政策片段
+
+    # ===== 售后决策子图相关 =====
+    after_sales_result: dict  # 售后子图返回的结构化决策结果（可选，便于排查）
 
     # ===== 用户信息（登录后注入）=====
     user_id: str  # 用户ID

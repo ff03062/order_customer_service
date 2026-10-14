@@ -74,7 +74,7 @@ def get_redis_conn():
 def check_email(email: str):
     email = email.replace("'", "''")  # 防注入
     sql = f"select * from users where email='{email}'"
-    result = mysql_tool.invoke({"sql": sql, "user_id": ""})
+    result = mysql_tool.invoke({"sql": sql, "user_id":1})
     try:
         return json.loads(result)
     except json.JSONDecodeError:

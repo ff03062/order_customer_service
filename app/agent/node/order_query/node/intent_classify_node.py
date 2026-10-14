@@ -25,7 +25,8 @@ INTENT_PROMPT = """
 
 
 def intent_classify_node(state: dict) -> dict:
-    user_input = state["user_input"]
+    # 优先使用 query_rewrite_node 改写后的自包含问题（无指代时它与原问题相同）
+    user_input = state.get("rewritten_input") or state["user_input"]
     model = MyModel.get_model()
 
     prompt = INTENT_PROMPT.format(

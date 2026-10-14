@@ -12,8 +12,8 @@ def manager_node(state: CustomerServiceState) -> Command:
     管理员节点 - 中枢路由
 
     根据意图识别结果，决定下一步路由：
-    - order_query → order_node（订单查询）
-    - after_sales → policy_node（售后政策）
+    - order_query → order_node（订单查询子图）
+    - after_sales → after_sales_node（售后决策子图）
     - chat → chat_node（闲聊）
     - unknown → chat_node（兜底闲聊）
     """
@@ -25,6 +25,6 @@ def manager_node(state: CustomerServiceState) -> Command:
     if intent == "order_query":
         return Command(goto="order")
     elif intent == "after_sales":
-        return Command(goto="policy")
+        return Command(goto="after_sales")
     else:
         return Command(goto="chat")

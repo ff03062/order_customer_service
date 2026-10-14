@@ -1,63 +1,176 @@
 """
-售后政策检索工具。
+售后政策检索工具（条款级）
 
-向量检索 + BM25 + RRF 融合排序，返回最相关的政策片段。
-文档来源：data/policies/after_sales_policy.md（写死在代码里）
+改造要点（相对旧版把 7 条政策硬编码在 Python 里）：
+    1. 政策来源改为 data/policies/after_sales_policy.md —— 改文档即生效，无需改代码
+    2. 按 Markdown 标题切成「条款」（clause），每条带 clause_id，便于回答时引用依据
+    3. 保留原有的「向量检索 + BM25 + RRF 融合」三件套，只把粒度从整篇改成条款
+
+对外接口：
+    search_clauses(query, top_k)   → list[dict]  给程序调用（结构化）
+    search(query, top_k)           → list[tuple] 兼容旧调用（文本 + 分数）
+    format_clauses(clauses)        → str         给 Prompt 用的文本
 """
 import os
+import re
+
 import jieba
-from rank_bm25 import BM25Okapi
-from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
+from rank_bm25 import BM25Okapi
 
 load_dotenv()
 
-POLICY_DOCS = [
-    "自收到商品之日起7天内可申请退货，15天内可申请换货。退货时需保持商品完好、附件齐全、发票完整。",
-    '退货流程：1. 在订单详情页点击"申请退货" 2. 选择退货原因并上传凭证 3. 客服审核通过后寄回商品 4. 收到退货并确认后3-5个工作日内退款。',
-    "退款规则：收到退货并确认后3-5个工作日内原路返回。退款方式：原支付渠道退回（支付宝/微信/银行卡），退款时间根据支付渠道不同可能延迟1-3个工作日。特殊情况：未收货取消订单24小时内处理，部分退款联系客服申请。",
-    '运费险：购买运费险后，退货时可获得最高20元的运费补偿。理赔流程：1. 退货时选择"使用运费险" 2. 填写物流单号 3. 确认收货后自动理赔 4. 理赔金额将退回至用户账户。注意：运费险仅限退货使用，换货不适用。',
-    "保修服务：自购买之日起一年内在非人为损坏情况下可享受免费保修服务。保修范围：产品质量问题、非人为因素导致的故障。保修流程：1. 联系客服申请保修 2. 寄送商品至指定地址 3. 维修完成后寄回。保修凭证：需要提供订单截图和发票。",
-    '售后联系方式：客服电话400-123-4567（9:00-21:00），在线客服：App内右下角"我的"-"客服中心"，邮箱：service@example.com。',
-    "特殊商品政策：以下商品不支持7天无理由退货：生鲜、食品、定制商品、贴身衣物、软件、虚拟商品。以下商品在保修期内可申请换货：电子产品（手机、电脑等）、家用电器、家具。",
-]
+# 政策文档路径（app/tool/ -> ../../data/policies/）
+_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+POLICY_DOC_PATH = os.getenv(
+    "POLICY_DOC_PATH",
+    os.path.join(_PROJECT_ROOT, "data", "policies", "after_sales_policy.md"),
+)
 
-# 预加载 BM25 索引
-BM25_INDEX = BM25Okapi([list(jieba.cut(doc)) for doc in POLICY_DOCS])
+# 召回阈值：向量用余弦相似度（0~1，0.7 合理）；
+# BM25 分数是无上界量纲，阈值必须放低，否则短查询几乎召回不到
+VECTOR_THRESHOLD = 0.7
+BM25_THRESHOLD = 0.3
 
-# 预加载词嵌入模型
-EMBEDDING_MODEL = SentenceTransformer(os.getenv("EMBEDDING_MODEL_PATH"))
+# 懒加载缓存
+_CLAUSES = None
+_BM25_INDEX = None
+_EMBEDDING_MODEL = None
+_DOC_VECTORS = None
 
-# 预编码文档向量（写在函数外部，只算一次）
-DOC_VECTORS = [EMBEDDING_MODEL.encode([doc], normalize_embeddings=True)for doc in POLICY_DOCS]
 
+# ============================================================
+# 一、政策文档 → 条款切分
+# ============================================================
+
+def _strip_markdown(text: str) -> str:
+    """去掉 Markdown 标记，保留纯文本，便于向量化与 BM25 分词。"""
+    text = re.sub(r"^#{1,6}\s*", "", text, flags=re.MULTILINE)   # 标题符号
+    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)                 # 粗体
+    text = re.sub(r"[`*_>]", "", text)                           # 其他标记
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _load_clauses() -> list[dict]:
+    """
+    把政策 md 按标题切分成条款列表。
+
+    切分规则：
+        - `## 一级标题` 开启新条款
+        - `### 二级标题` 作为该条款的子节，保留在正文中
+
+    返回：[{"clause_id": "POLICY-01", "title": "退货政策", "text": "..."}]
+    """
+    global _CLAUSES
+    if _CLAUSES is not None:
+        return _CLAUSES
+
+    clauses: list[dict] = []
+    if not os.path.exists(POLICY_DOC_PATH):
+        print(f"[policy] 政策文档不存在：{POLICY_DOC_PATH}")
+        _CLAUSES = clauses
+        return _CLAUSES
+
+    with open(POLICY_DOC_PATH, "r", encoding="utf-8") as f:
+        lines = f.read().splitlines()
+
+    current_title = None
+    buffer: list[str] = []
+
+    def flush():
+        if current_title and buffer:
+            body = _strip_markdown("\n".join(buffer))
+            if body:
+                clauses.append({
+                    "clause_id": f"POLICY-{len(clauses) + 1:02d}",
+                    "title": current_title,
+                    "text": body,
+                })
+
+    for line in lines:
+        if line.startswith("## "):           # 一级条款
+            flush()
+            current_title = line[3:].strip()
+            buffer = []
+        elif line.startswith("# "):          # 文档总标题，跳过
+            continue
+        else:
+            if current_title is not None:
+                buffer.append(line)
+    flush()
+
+    _CLAUSES = clauses
+    print(f"[policy] 已加载政策条款 {len(clauses)} 条：{POLICY_DOC_PATH}")
+    return _CLAUSES
+
+
+# ============================================================
+# 二、检索索引（懒加载，避免 import 时触发模型加载）
+# ============================================================
+
+def _ensure_index():
+    global _BM25_INDEX, _EMBEDDING_MODEL, _DOC_VECTORS
+
+    clauses = _load_clauses()
+    if not clauses:
+        return
+
+    if _BM25_INDEX is None:
+        _BM25_INDEX = BM25Okapi([list(jieba.cut(c["text"])) for c in clauses])
+
+    if _EMBEDDING_MODEL is None:
+        model_path = os.getenv("EMBEDDING_MODEL_PATH")
+        try:
+            from sentence_transformers import SentenceTransformer
+            _EMBEDDING_MODEL = SentenceTransformer(model_path)
+        except Exception as e:
+            print(f"[policy] 向量模型加载失败，降级为纯 BM25 检索: {e}")
+            _EMBEDDING_MODEL = False   # False 表示「已尝试但失败」
+
+    if _DOC_VECTORS is None:
+        if _EMBEDDING_MODEL:
+            _DOC_VECTORS = [
+                _EMBEDDING_MODEL.encode([c["text"]], normalize_embeddings=True)
+                for c in clauses
+            ]
+        else:
+            _DOC_VECTORS = []
+
+
+# ============================================================
+# 三、两路召回 + RRF 融合
+# ============================================================
 
 def vector_search(query: str, top_k: int = 3) -> list[tuple[str, float]]:
-    """向量检索：使用 BGE 模型计算相似度，返回 top_k 条结果。"""
-    # 计算问题向量
-    query_vec = EMBEDDING_MODEL.encode([query], normalize_embeddings=True)
+    """向量检索：返回 (clause_id, 相似度) 列表。"""
+    _ensure_index()
+    clauses = _load_clauses()
+    if not _EMBEDDING_MODEL or not _DOC_VECTORS:
+        return []
+
+    query_vec = _EMBEDDING_MODEL.encode([query], normalize_embeddings=True)
     results = []
-    for doc, doc_vec in zip(POLICY_DOCS, DOC_VECTORS):
-        # 向量检索器
-        # 计算问题得分
+    for clause, doc_vec in zip(clauses, _DOC_VECTORS):
         score = float((query_vec @ doc_vec.T)[0][0])
-        # 过滤掉相似度小于 0.7 的结果
-        if score >= 0.7:
-            results.append((doc, score))
+        if score >= VECTOR_THRESHOLD:
+            results.append((clause["clause_id"], score))
     results.sort(key=lambda x: x[1], reverse=True)
     return results[:top_k]
 
 
 def bm25_search(query: str, top_k: int = 3) -> list[tuple[str, float]]:
-    # BM25 检索：使用 jieba 分词，返回 top_k 条结果。
-    tokenized_query = list(jieba.cut(query))
-    # 由bm2检索器计算得分
-    raw_scores = BM25_INDEX.get_scores(tokenized_query)
+    """BM25 检索：返回 (clause_id, 分数) 列表。"""
+    _ensure_index()
+    clauses = _load_clauses()
+    if not _BM25_INDEX:
+        return []
+
+    scores = _BM25_INDEX.get_scores(list(jieba.cut(query)))
     results = []
-    for doc, score in zip(POLICY_DOCS, raw_scores):
-        # 过滤掉相似度小于 0.7 的结果
-        if score >= 0.7:
-            results.append((doc, score))
+    for clause, score in zip(clauses, scores):
+        if score >= BM25_THRESHOLD:
+            results.append((clause["clause_id"], float(score)))
     results.sort(key=lambda x: x[1], reverse=True)
     return results[:top_k]
 
@@ -65,25 +178,71 @@ def bm25_search(query: str, top_k: int = 3) -> list[tuple[str, float]]:
 def rrf_fusion(
     vector_results: list[tuple[str, float]],
     bm25_results: list[tuple[str, float]],
-    # 固定参
     k: int = 60,
 ) -> list[tuple[str, float]]:
-    """RRF（Reciprocal Rank Fusion）：对两条排序结果做融合。"""
-    doc_rrf = {}
-    for rank, (doc, _) in enumerate(vector_results, start=1):
-        doc_rrf[doc] = doc_rrf.get(doc, 0.0) + 1.0 / (k + rank)
-    for rank, (doc, _) in enumerate(bm25_results, start=1):
-        doc_rrf[doc] = doc_rrf.get(doc, 0.0) + 1.0 / (k + rank)
-    fused = [(doc, score) for doc, score in doc_rrf.items()]
+    """RRF（Reciprocal Rank Fusion）：对两路排序结果做融合。"""
+    merged: dict[str, float] = {}
+    for rank, (doc_id, _) in enumerate(vector_results, start=1):
+        merged[doc_id] = merged.get(doc_id, 0.0) + 1.0 / (k + rank)
+    for rank, (doc_id, _) in enumerate(bm25_results, start=1):
+        merged[doc_id] = merged.get(doc_id, 0.0) + 1.0 / (k + rank)
+    fused = list(merged.items())
     fused.sort(key=lambda x: x[1], reverse=True)
     return fused
 
 
-def search(query: str, top_k: int = 3) -> list[tuple[str, float]]:
-    """检索入口：向量检索 + BM25 检索 → RRF 融合 → 返回最终排序结果。"""
+# ============================================================
+# 四、对外接口
+# ============================================================
+
+def search_clauses(query: str, top_k: int = 3) -> list[dict]:
+    """
+    条款级检索入口。
+
+    返回：[{"clause_id", "title", "text", "score"}]
+    两路都召回不到时降级为「标题字面命中」，仍无结果则返回空列表。
+    """
+    clauses = _load_clauses()
+    if not clauses:
+        return []
+
+    by_id = {c["clause_id"]: c for c in clauses}
     vec = vector_search(query, top_k=top_k)
     bm25 = bm25_search(query, top_k=top_k)
+
     if not vec and not bm25:
-        return []
-    fused = rrf_fusion(vec, bm25)
-    return fused[:top_k]
+        # 字面兜底：查询词直接出现在条款标题里
+        hits = [
+            c for c in clauses
+            if any(tok and len(tok) > 1 and tok in c["title"] for tok in jieba.cut(query))
+        ]
+        return [{**c, "score": 0.0} for c in hits[:top_k]]
+
+    fused = rrf_fusion(vec, bm25)[:top_k]
+    return [
+        {**by_id[doc_id], "score": round(score, 6)}
+        for doc_id, score in fused
+        if doc_id in by_id
+    ]
+
+
+def search(query: str, top_k: int = 3) -> list[tuple[str, float]]:
+    """兼容旧接口：返回 [(条款纯文本, 分数)]。"""
+    return [(c["text"], c["score"]) for c in search_clauses(query, top_k)]
+
+
+def format_clauses(clauses: list[dict]) -> str:
+    """把条款列表格式化成给 Prompt 用的文本（带编号，便于模型引用依据）。"""
+    if not clauses:
+        return "（知识库未覆盖该问题）"
+    return "\n\n".join(
+        f"[{c['clause_id']}] {c['title']}\n{c['text']}" for c in clauses
+    )
+
+
+if __name__ == "__main__":
+    for q in ["退货几天能到账", "运费险换货能用吗", "定制商品能退吗"]:
+        print("=" * 60)
+        print("问题：", q)
+        for c in search_clauses(q):
+            print(f"  [{c['clause_id']}] {c['title']}  score={c['score']}")

@@ -13,7 +13,7 @@ from app.agent.state.customer_state import CustomerServiceState
 from app.agent.node.manager_node import manager_node
 from app.agent.node.intent_node import intent_node
 from app.agent.node.order_node import order_node
-from app.agent.node.policy_node import policy_node
+from app.agent.node.after_sales_node import after_sales_node
 from app.agent.node.chat_node import chat_node_stream
 from app.agent.memory.manager import SessionManager, MemoryManager
 
@@ -36,13 +36,15 @@ def order_node_with_fallback(state: CustomerServiceState):
         )
 
 
-def policy_node_with_fallback(state: CustomerServiceState):
-    """policy 节点异常时跳 chat。"""
+def after_sales_node_with_fallback(state: CustomerServiceState):
+    """after_sales 节点异常时跳 chat。"""
     try:
-        result = policy_node(state)
+        result = after_sales_node(state)
         return Command(update=result, goto=END)
     except Exception as e:
-        print(f"[fallback] policy_node 失败: {e}，跳转 chat")
+        import traceback
+        print(f"[fallback] after_sales_node 失败: {e}")
+        print(traceback.format_exc())
         return Command(
             update={"messages": [AIMessage(content=FALLBACK_MSG)], "current_step": "fallback"},
             goto="chat",
@@ -61,7 +63,7 @@ class CustomerServiceGraph:
         graph.add_node("manager", manager_node)
         graph.add_node("intent", intent_node)
         graph.add_node("order", order_node_with_fallback)
-        graph.add_node("policy", policy_node_with_fallback)
+        graph.add_node("after_sales", after_sales_node_with_fallback)
         graph.add_node("chat", chat_node_stream)
 
         graph.add_edge(START, "intent")
@@ -121,8 +123,21 @@ class CustomerServiceGraph:
 
         ai_answer = ""
         # 构建用户问题
+        #
+        # 注意（查询层状态共享）：
+        #   这里只传 messages / user_id / user_email。
+        #   current_order_id、order_context 等字段都是「无 reducer 的标量通道」，
+        #   本轮输入里没有它们时，LangGraph 会保留上一轮 checkpoint 的值 —— 
+        #   这正是订单/售后子图能在下一轮拿到「上一笔订单」的原因。
+        #   反过来说：不能在这里把它们写成默认空字符串，否则会覆盖掉上一轮的实体。
+        #
+        # 记忆构建失败时 memory_prompt 为空串，不能塞进 messages（会污染消息列表）
+        messages = [HumanMessage(content=question)]
+        if memory_prompt:
+            messages.insert(0, memory_prompt)
+
         user_msg = {
-            "messages": [memory_prompt, HumanMessage(content=question)],
+            "messages": messages,
             "user_id": user_id,
             "user_email": "",
         }
@@ -135,14 +150,11 @@ class CustomerServiceGraph:
                 # 采用异步流式
                 async for c, m in self.graph.astream(user_msg, config, stream_mode=["messages", "custom"]):
                     if c == "messages":
-                        messages, meta = m # 在messages情况下必须用这种二元组解包的方式
-
-                        if messages.content:
-                            # 累加
-                            ai_answer += messages.content
-                            yield messages.content
+                        chunk, meta = m  # messages 模式下是 (MessageChunk, metadata) 二元组
+                        if chunk.content:
+                            ai_answer += chunk.content
+                            yield chunk.content
                     else:
-                        # 累加
                         ai_answer += m
                         yield m
             print(f"AI回复:{ai_answer}")

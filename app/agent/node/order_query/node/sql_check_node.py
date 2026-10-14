@@ -75,23 +75,44 @@ def has_user_id_placeholder(sql: str) -> bool:
     )
 
 
+# LIMIT / ORDER BY / GROUP BY / HAVING 必须排在 WHERE 之后，
+# 所以补 user_id 时要插在它们前面，不能直接追加到 SQL 末尾
+TRAILING_CLAUSE_PATTERN = re.compile(
+    r"\b(LIMIT|ORDER\s+BY|GROUP\s+BY|HAVING)\b", re.IGNORECASE
+)
+
+
+def _insert_condition(sql: str, condition: str) -> str:
+    """
+    把过滤条件插到正确的位置。
+
+    正确：SELECT ... WHERE order_id = 1 AND user_id = {{user_id}} LIMIT 100
+    错误：SELECT ... WHERE order_id = 1 LIMIT 100 AND user_id = {{user_id}}
+          （AND 跑到 LIMIT 后面，直接 1064 语法错误）
+    """
+    match = TRAILING_CLAUSE_PATTERN.search(sql)
+    if not match:
+        return sql + " " + condition
+
+    head = sql[: match.start()].rstrip()
+    tail = sql[match.start():].strip()
+
+    joiner = " AND " if re.search(r"\bWHERE\b", head, re.IGNORECASE) else " WHERE "
+    return f"{head}{joiner}{condition} {tail}"
+
+
 def supplement_user_id(sql: str, intent: str, tables: list[str]) -> str:
     """
     补充 user_id 占位符。
-    - orders / after_sales 表：直接加 WHERE user_id = {user_id}
-    - order_items / logistics 表：通过 JOIN orders 补充 WHERE o.user_id = {user_id}
+    - orders / after_sales 表：加 user_id = {user_id} 过滤
+    - 字典表（products / categories）：不需要过滤
+    - 会自动插到 LIMIT / ORDER BY 之前，避免语法错误
     """
     if intent in DICT_INTENTS:
         return sql
 
-    # 已有的 WHERE 条件
-    has_where = re.search(r"\bWHERE\b", sql, re.IGNORECASE)
-
     if "orders" in tables and not has_user_id_placeholder(sql):
-        if has_where:
-            sql += " AND user_id = {user_id}"
-        else:
-            sql += " WHERE user_id = {user_id}"
+        sql = _insert_condition(sql, "user_id = {user_id}")
 
     return sql
 
