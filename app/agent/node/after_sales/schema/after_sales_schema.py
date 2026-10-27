@@ -2,7 +2,7 @@
 售后决策子图的业务 Schema 配置。
 
 包含四块：
-    1. INTENT_OPTIONS / INTENT_LABELS   二级售后意图枚举
+    1. INTENT_LABELS                  二级售后意图枚举（key 就是枚举值）
     2. REQUIRED_SLOTS / SLOT_QUESTIONS  槽位定义与反问话术
     3. ORDER_STATUS_MAP / AFTER_SALES_MAP 状态码映射（供 LLM 理解业务语义）
     4. RULES                            规则表（确定性判定，程序执行）
@@ -16,24 +16,8 @@ from app.tool.order_facts_tool import (
 )
 
 # ============================================================
-# 一、二级售后意图
+# 一、二级售后意图（一份数据，代码里只维护这个 dict）
 # ============================================================
-
-INTENT_OPTIONS = [
-    "return_refund_apply",      # 申请退货退款
-    "refund_status",            # 查询退款进度
-    "no_reason_return",         # 七天无理由退货
-    "refund_amount_dispute",    # 退款金额争议
-    "exchange_apply",           # 申请换货
-    "repair_apply",             # 申请维修
-    "warranty_claim",           # 保修申请
-    "freight_insurance",        # 运费险咨询 / 理赔
-    "freight_dispute",          # 运费承担争议
-    "price_protection",         # 价保申请
-    "complaint",                # 投诉
-    "logistics_damage",         # 物流损坏 / 丢件
-    "special_goods_policy",     # 特殊商品政策咨询
-]
 
 INTENT_LABELS = {
     "return_refund_apply": "申请退货退款",
@@ -50,6 +34,9 @@ INTENT_LABELS = {
     "logistics_damage": "物流损坏或丢件",
     "special_goods_policy": "特殊商品政策咨询",
 }
+
+# 单次调用内的反问上限（clarify_node / llm_reasoning_node / 子图路由共用）
+MAX_CLARIFY = 2
 
 # ============================================================
 # 二、槽位定义
@@ -81,7 +68,6 @@ SLOT_QUESTIONS = {
     "order_id": "请问您说的是哪一笔订单？把订单号发给我，我帮您查一下～",
     "reason": "方便说一下退货原因吗？（例如：不想要了 / 尺码不合适 / 有质量问题）",
     "damage_desc": "麻烦描述一下具体的问题情况（比如哪里损坏、什么故障），我好帮您判断走哪种售后～",
-    "unboxed": "请问商品已经拆封使用了吗？这会影响可选的售后方式哦～",
 }
 
 # 槽位中文名（用于生成话术与提示词）
@@ -89,16 +75,10 @@ SLOT_LABELS = {
     "order_id": "订单号",
     "reason": "退货原因",
     "damage_desc": "问题描述",
-    "unboxed": "是否拆封",
-    "quality_issue": "是否存在质量问题",
-    "invoice": "是否保留发票",
 }
 
 # 纯政策咨询类意图：不需要订单号，也不应该因为没有订单号而反问
 POLICY_ONLY_INTENTS = {"special_goods_policy"}
-
-# 从用户口述中抽取的事实槽位（数据库查不到的，必须问用户）
-USER_FACT_SLOTS = ["reason", "damage_desc", "quality_issue", "unboxed", "invoice"]
 
 # ============================================================
 # 三、状态码映射（供 LLM 理解业务语义）
@@ -114,12 +94,9 @@ LOGISTICS_STATUS_MAP = "0未入库 1运输中 2已签收"
 # ============================================================
 
 CONFLICT_TYPES = {
-    "unboxed_but_quality": "已拆封但存在质量问题（包装完整性与质量责任的权衡）",
     "expired_no_reason": "政策可退但订单已超出无理由退货期限",
     "special_category": "商品属于不支持无理由退货的特殊品类",
     "existing_after_sales": "该订单已有进行中的售后单",
-    "logistics_damage_dispute": "物流损坏，责任归属待判定",
-    "refund_amount_mismatch": "退款金额与用户预期不一致",
     "other": "其他需要综合判断的灰区场景",
 }
 
@@ -245,7 +222,7 @@ RULES = [
         "pass": {"special_category_ok": True},
         "fail": {"action": "reject", "reason_code": "SPECIAL_CATEGORY"},
         "conflict": "special_category",
-        "basis": ["POLICY-07"],
+        "basis": ["POLICY-06"],
     },
     {
         "id": "R004",
@@ -259,7 +236,7 @@ RULES = [
         },
         "fail": {},
         "conflict": None,
-        "basis": ["POLICY-05", "POLICY-01"],
+        "basis": ["POLICY-01"],
     },
     {
         "id": "R005",
@@ -270,7 +247,7 @@ RULES = [
         "pass": {"action": "approve_repair", "reason_code": "IN_WARRANTY"},
         "fail": {"action": "reject_or_convert", "reason_code": "OUT_OF_WARRANTY"},
         "conflict": "other",
-        "basis": ["POLICY-05"],
+        "basis": ["POLICY-04"],
     },
     {
         "id": "R006",
@@ -285,7 +262,7 @@ RULES = [
         # 绝不能被 combine_decisions 当成拒绝理由。
         "informational": True,
         "conflict": None,
-        "basis": ["POLICY-04"],
+        "basis": ["POLICY-03"],
     },
     {
         "id": "R007",
@@ -297,7 +274,7 @@ RULES = [
         "pass": {"refund_amount": None},   # 具体金额由 _apply_default_amount 用订单实付填充
         "fail": {},
         "conflict": None,
-        "basis": ["POLICY-03"],
+        "basis": ["POLICY-02"],
     },
     {
         "id": "R008",
@@ -462,10 +439,3 @@ def apply_existing_after_sales(intent: str, facts: dict, order_facts: dict) -> l
         facts["reason_source"] = "after_sales.type/description"
 
     return missing_required_slots(intent, facts)
-
-
-def clarify_question_for(missing: list[str]) -> str:
-    """按缺失槽位生成反问话术。"""
-    if not missing:
-        return "麻烦您再补充一点信息，我好帮您处理～"
-    return SLOT_QUESTIONS.get(missing[0], "麻烦您再补充一点信息，我好帮您处理～")

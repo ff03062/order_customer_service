@@ -4,9 +4,9 @@
 调用方式：
     from app.agent.node.order_query.graph.order_subgraph import OrderQuerySubGraph
 
-    subgraph = OrderQuerySubGraph(checkpoint)
+    subgraph = OrderQuerySubGraph()
     subgraph.draw()
-    result = subgraph.invoke({
+    result = subgraph.agent.invoke({
         "user_input": "那它到哪了",              # 本轮用户原话
         "user_id": "1",
         "chat_history": [...],                  # 最近几轮消息（可选）
@@ -81,11 +81,10 @@ class OrderQuerySubGraph:
        END
     """
 
-    def __init__(self, checkpoint=None):
-        self.memory = checkpoint
-        self.agent = self.get_agent()
+    def __init__(self):
+        self.agent = self._build()
 
-    def get_agent(self):
+    def _build(self):
         graph = StateGraph(OrderQueryState)
 
         graph.add_node("query_rewrite_node", query_rewrite_node)
@@ -123,21 +122,7 @@ class OrderQuerySubGraph:
 
         graph.add_edge("answer_translate_node", END)
 
-        self.agent = graph.compile(checkpointer=self.memory)
-        return self.agent
-
-    def invoke(self, inputs: dict) -> dict:
-        return self.agent.invoke(inputs)
-
-    async def ainvoke(self, inputs: dict) -> dict:
-        return await self.agent.ainvoke(inputs)
-
-    async def chat_stream(self, user_input: str, user_id: str, session_id: str):
-        result = await self.ainvoke({
-            "user_input": user_input,
-            "user_id": user_id,
-        })
-        yield result.get("answer", "")
+        return graph.compile()
 
     def draw(self, filename: str = "order_subgraph.png"):
         data = self.agent.get_graph().draw_mermaid_png()

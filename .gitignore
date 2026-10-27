@@ -1,7 +1,36 @@
+# ===== 环境变量（绝对不要提交）=====
 .env
+.env.*
+!.env.example
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+
+# ===== IDE =====
 .idea/
 .vscode/
-__pycache__/
-*.pyc
-data/
+*.swp
+
+# ===== 运行时产生的数据（体积大 / 含用户数据）=====
+data/chroma_db/
+data/*.db
+data/*.sqlite3
+data/schema/
+
+# ===== 日志 =====
 *.log
+
+# ===== 自动生成的拓扑图（python -m <模块> 可重新生成）=====
+*.png
+!docs/**/*.png
+
+# ===== 个人笔记 / 临时脚本，不属于项目 =====
+DSH修改建议.txt
+test.py

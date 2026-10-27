@@ -3,10 +3,9 @@
 职责：规则引擎无法直接定论的「冲突场景」由 LLM 综合判断。
 
 典型冲突场景：
-    - 已拆封但存在质量问题 → 包装完整性与质量责任如何权衡
-    - 政策可退但订单已超出无理由期限 → 能否降级为换货 / 维修
+    - 已签收但已超出无理由期限 → 能否降级为换货 / 维修
     - 商品属于特殊品类 → 是否有例外情形
-    - 物流损坏 → 责任归属判断
+    - 政策可退但规则给出了 reject → 有没有替代方案
 
 约束（防止 LLM 乱答应）：
     1. 只能依据【命中政策】作答，政策未覆盖则 need_human=true
@@ -19,19 +18,17 @@
 """
 import json
 
-from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, Field
 
-from app.agent.model.my_model import MyModel
+from app.agent.node.after_sales.common import format_order_facts, structured_call
 from app.agent.node.after_sales.schema import (
     CONFLICT_TYPES,
     INTENT_LABELS,
+    MAX_CLARIFY,
     ORDER_STATUS_MAP,
     SLOT_LABELS,
     freight_note,
 )
-
-MAX_CLARIFY = 2   # 单次调用内反问次数上限
 
 
 class ReasoningSchema(BaseModel):
@@ -64,45 +61,16 @@ _SYSTEM_PROMPT = """你是电商平台的「售后政策裁决助手」，负责
 2. 若政策未覆盖该场景，输出 need_human=true，不要自行给出承诺
 3. **未签收的订单可以随时退货**（商品在途中，七天无理由时效尚未开始），不得以超期为由拒绝
 4. **质量问题不受七天无理由时效限制**：签收超过 7 天但属质量问题的，仍应支持退货
-5. 质量问题通常优先于包装完整性（已拆封但有质量问题的，一般应支持售后）
-6. 已签收、无质量问题、且超出七天无理由期限的，考虑降级为换货（15 天内）或维修，而不是直接拒绝
-7. 需要用户补充的信息最多列 2 项，且**只列用户尚未提供、且用户能够提供的信息**；
+5. 已签收、无质量问题、且超出七天无理由期限的，考虑降级为换货（15 天内）或维修，而不是直接拒绝
+6. 需要用户补充的信息最多列 2 项，且**只列用户尚未提供、且用户能够提供的信息**；
    订单号、签收天数、金额等系统已查到的信息不要列进来
-8. clause_ids 必须来自【命中政策】中的条款编号
+7. clause_ids 必须来自【命中政策】中的条款编号
 
 【输出格式】
 只输出一个 json 对象，不要输出任何其他文字、解释或 Markdown 代码块：
 {{"action": "approve_return|approve_exchange|approve_repair|reject|consult",
 "refund_amount": 0, "freight_compensation": 0, "reason": "",
 "clause_ids": [], "need_more_info": false, "missing_info": [], "need_human": false}}"""
-
-
-def _format_facts(order_facts: dict) -> str:
-    if not order_facts or not order_facts.get("found"):
-        return "（未取到订单事实）"
-
-    is_signed = bool(order_facts.get("is_signed"))
-    if is_signed:
-        signed_desc = (
-            f"已签收，签收距今 {order_facts.get('days_since_receipt')} 天"
-            f"（依据：{order_facts.get('signed_source') or '未知'}）"
-        )
-    else:
-        signed_desc = (
-            f"未签收（物流状态 {order_facts.get('logistics_status')}）"
-            "—— 商品在途中，七天无理由时效尚未开始"
-        )
-
-    return (
-        f"订单状态：{order_facts.get('order_status')}"
-        f"（{ORDER_STATUS_MAP}）\n"
-        f"签收情况：{signed_desc}\n"
-        f"下单距今：{order_facts.get('days_since_purchase')} 天\n"
-        f"商品品类：{order_facts.get('categories')}\n"
-        f"实付金额：{order_facts.get('pay_amount')}\n"
-        f"运费险：{'有' if order_facts.get('has_freight_insurance') else '无'}\n"
-        f"已有售后单：{'是' if order_facts.get('has_existing_after_sales') else '否'}"
-    )
 
 
 def _format_user_facts(facts: dict) -> str:
@@ -114,81 +82,6 @@ def _format_user_facts(facts: dict) -> str:
         if k != "order_id"
     ]
     return "\n".join(lines) if lines else "（无）"
-
-
-def _invoke(prompt: str) -> ReasoningSchema | None:
-    """结构化输出优先，失败退回文本 + JSON 解析；云端失败降级本地模型。"""
-    for getter in ("get_model", "get_local_model"):
-        try:
-            model = getattr(MyModel, getter)()
-        except Exception as e:
-            print(f"[llm_reasoning] {getter} 初始化失败: {e}")
-            continue
-
-        try:
-            structured = model.with_structured_output(ReasoningSchema, method="json_mode")
-            result = structured.invoke([HumanMessage(content=prompt)])
-            parsed = _coerce_result(result)
-            if parsed is not None:
-                return parsed
-        except Exception as e:
-            print(f"[llm_reasoning] {getter} 结构化输出失败，改用文本解析: {e}")
-
-        try:
-            text = model.invoke([HumanMessage(content=prompt)]).content
-            data = _extract_json(text)
-            if data:
-                return ReasoningSchema(**data)
-        except Exception as e:
-            print(f"[llm_reasoning] {getter} 文本解析失败: {e}")
-
-    return None
-
-
-def _coerce_result(result) -> ReasoningSchema | None:
-    """
-    把模型返回值统一成 ReasoningSchema。
-
-    实测云端模型即使调用 with_structured_output 也会返回 [ {...} ]（JSON 数组），
-    需要先剥掉外层列表，否则报 "Input should be an object"。
-    """
-    if result is None:
-        return None
-    if isinstance(result, ReasoningSchema):
-        return result
-
-    payload = result
-    if isinstance(payload, str):
-        payload = _extract_json(payload)
-    if isinstance(payload, list):
-        payload = next((item for item in payload if isinstance(item, dict)), None)
-    if isinstance(payload, dict):
-        for key in ("result", "output", "data"):
-            inner = payload.get(key)
-            if isinstance(inner, dict):
-                payload = inner
-                break
-        try:
-            return ReasoningSchema(**payload)
-        except Exception as e:
-            print(f"[llm_reasoning] 结构化结果字段校验失败: {e}")
-    return None
-
-
-def _extract_json(text: str) -> dict | None:
-    if not text or not isinstance(text, str):
-        return None
-    text = text.strip()
-    if text.startswith("```"):
-        lines = text.split("\n")
-        text = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
-    start, end = text.find("{"), text.rfind("}")
-    if start == -1 or end <= start:
-        return None
-    try:
-        return json.loads(text[start:end + 1])
-    except (json.JSONDecodeError, ValueError):
-        return None
 
 
 def llm_reasoning_node(state: dict) -> dict:
@@ -204,13 +97,13 @@ def llm_reasoning_node(state: dict) -> dict:
     ) + (
         f"\n\n【用户诉求】{INTENT_LABELS.get(intent, intent)}"
         f"\n【用户原话】{state.get('rewritten_input') or state.get('user_input', '')}"
-        f"\n【订单事实】\n{_format_facts(order_facts)}"
+        f"\n【订单事实】\n{format_order_facts(order_facts)}"
         f"\n【用户口述信息】\n{_format_user_facts(facts)}"
         f"\n【规则引擎判定】{json.dumps(rule_summary, ensure_ascii=False)}"
         f"\n【命中政策】\n{state.get('policy_text') or '（知识库未覆盖）'}"
     )
 
-    result = _invoke(prompt)
+    result = structured_call(ReasoningSchema, prompt)
 
     if result is None:
         # 模型不可用：保守兜底 —— 转人工，不给错误承诺

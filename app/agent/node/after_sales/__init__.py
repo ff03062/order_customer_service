@@ -7,12 +7,12 @@
     ├── schema/   二级意图 / 槽位 / 规则表 / 冲突类型
     ├── node/     intent_slot / order_facts / policy_rules /
     │             llm_reasoning / solution_generate / clarify / action_execute
-    └── graph/    AfterSalesSubGraph 类（invoke / ainvoke / draw）
+    └── graph/    AfterSalesSubGraph 类（编译在 .agent 上，draw 画图）
 
 入口：
     from app.agent.node.after_sales.graph.after_sales_subgraph import AfterSalesSubGraph
     subgraph = AfterSalesSubGraph()
-    result = subgraph.invoke({"user_input": "我要退货", "user_id": "1"})
+    result = subgraph.agent.invoke({"user_input": "我要退货", "user_id": "1"})
     print(result["solution"])
 """
 

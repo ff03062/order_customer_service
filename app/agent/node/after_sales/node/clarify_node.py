@@ -8,9 +8,12 @@
 输入：missing_slots / facts / clarify_count / intent
 输出：clarify_question / solution / clarify_count
 """
-from app.agent.node.after_sales.schema import SLOT_QUESTIONS, SLOT_LABELS, INTENT_LABELS
-
-MAX_CLARIFY = 2
+from app.agent.node.after_sales.schema import (
+    INTENT_LABELS,
+    MAX_CLARIFY,
+    SLOT_LABELS,
+    SLOT_QUESTIONS,
+)
 
 FALLBACK_TEXT = (
     "抱歉，我这边还需要更多信息才能帮您处理这次售后。"

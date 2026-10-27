@@ -27,6 +27,11 @@ class CustomerServiceState(TypedDict):
     intent: str  # "order_query" | "after_sales" | "chat" | "unknown"
     detail: str  # 意图判断依据或补充信息
 
+    # 本轮记忆上下文（窗口+摘要+长期+画像拼成的一段文本）
+    # 单独一个标量通道，不塞进 messages —— 它是「背景」，不是对话回合。
+    # 塞进 messages 会被 Checkpointer 永久保存，每轮重复一份，还会污染最近消息。
+    memory_context: str
+
     # ===== 订单查询相关 =====
     # 说明：current_order_id / order_context 是「无 reducer 的标量通道」，
     # 本轮输入没传时自动保留上一轮 checkpoint 的值 —— 这正是跨轮追问得以成立的基础。
@@ -37,9 +42,6 @@ class CustomerServiceState(TypedDict):
     sql_attempts: Annotated[list[str], operator.add]  # 每次尝试的 SQL（含失败的），便于调试
     db_result: str  # 数据库返回的 JSON 字符串
     db_error: str  # 数据库错误信息（空字符串表示成功）
-
-    # ===== 售后咨询相关 =====
-    retrieved_policies: list[str]  # rag 检索到的政策片段
 
     # ===== 售后决策子图相关 =====
     after_sales_result: dict  # 售后子图返回的结构化决策结果（可选，便于排查）

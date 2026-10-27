@@ -43,28 +43,28 @@ def order_node(state: CustomerServiceState) -> dict:
     user_id = state.get("user_id", "")
 
     # 跨轮上下文：来自主图 state（由 Checkpointer 从上一轮恢复）
-    last_order_id = str(state.get("current_order_id") or "")
-    order_context = str(state.get("order_context") or "")
+    last_order_id = str(state.get("current_order_id") or "")  # 当前对话ID
+    order_context = str(state.get("order_context") or "")   # 上下文描述，如"用户在查第3个订单，金额299元"
 
-    result = _get_subgraph().invoke({
+    result = _get_subgraph().agent.invoke({
         "user_input": user_input,
         "user_id": str(user_id),
-        # ---- 新增：上下文注入，解决「那它到哪了」这类省略指代 ----
+        # ---- 上下文注入，解决「那它到哪了」这类省略指代 ----
         "chat_history": _recent_history(state.get("messages")),
         "last_order_id": last_order_id,
         "order_context": order_context,
     })
 
-    answer = result.get("answer", "抱歉，查询失败，请稍后再试。")
-    sql = result.get("sql", "")
-    sql_attempts = result.get("sql_attempts", [])
-    db_result = result.get("db_result", "")
-    db_error = result.get("db_error", "")
-    intent = result.get("intent", "")
-    rewritten_input = result.get("rewritten_input", user_input)
+    answer = result.get("answer", "订单子图查询失败，无answer，请稍后重试")
+    sql = result.get("sql", "")                     # 解析后的 SQL
+    sql_attempts = result.get("sql_attempts", [])   # 每次尝试的原始输出
+    db_result = result.get("db_result", "")         # 数据库返回的 JSON 字符串（成功时）
+    db_error = result.get("db_error", "")           # 检查/执行失败信息（成功时为空）
+    intent = result.get("intent", "")               # "query_orders" | "query_order_items" | "query_logistics" | "query_after_sales" | "query_products" | "chitchat"
+    rewritten_input = result.get("rewritten_input", user_input)     # query_rewrite_node 改写后的自包含问题
 
     # ---- 回写实体：供下一轮追问使用 ----
-    resolved = result.get("resolved_order_ids") or []
+    resolved = result.get("resolved_order_ids") or []       # 本次查询实际命中的订单号（供主图回写）
     current_order_id = resolved[0] if resolved else last_order_id
     # 累积出现过的订单号（去重保序），最多保留最近 5 个
     history_ids = list(state.get("current_order_ids") or [])
@@ -83,12 +83,12 @@ def order_node(state: CustomerServiceState) -> dict:
         "current_order_id": current_order_id,
         "current_order_ids": history_ids,
         "order_context": (
-            f"intent={intent}; "
-            f"rewritten={rewritten_input}; "
-            f"order_id={current_order_id}; "
-            f"sql_attempts={len(sql_attempts)}; "
+            f"意图 (intent)={intent}; "
+            f"自包含问题 (rewritten)={rewritten_input}; "
+            f"订单id (order_id)={current_order_id}; "
+            f"每次尝试原始输出 (sql_attempts)={len(sql_attempts)}; "
             f"{'失败：' + db_error if db_error else '成功'}；"
-            f"answer={answer}"
+            f"给用户的中文回答 (answer) ={answer}"
         ),
     }
 

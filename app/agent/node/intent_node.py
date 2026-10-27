@@ -41,23 +41,24 @@ def intent_node(state: CustomerServiceState) -> dict:
     """
     意图识别节点
 
-    流程：
-    1. 获取用户输入与上下文
-    2. 调用云端模型识别意图
-    3. 返回意图
+    1. 取用户当前问题 + 最近几轮对话
+    2. 云端模型识别意图，失败降级本地
+
+    为什么要带上下文：不带的话，"我们刚刚讨论的订单是哪个"这种
+    问「对话本身」的问题，会被当成「查订单」路由到 Text2SQL。
     """
-    # 获取用户输入
     last_msg = state["messages"][-1]
     user_input = ""
     if isinstance(last_msg, HumanMessage):
         user_input = last_msg.content
-        print("意图识别：用户输入问题：", user_input)
+    print("意图识别：用户输入问题：", user_input)
+
+    history = list(state["messages"][:-1])[-6:]
+    payload = {"messages": [*history, HumanMessage(content=user_input)]}
 
     try:
         # 调用模型（优先云端）
-        result = agent_cloud.invoke({
-            "messages": [HumanMessage(content=user_input)]
-        })
+        result = agent_cloud.invoke(payload)
 
         # 解析结果
         data = result["structured_response"].model_dump()
@@ -73,9 +74,7 @@ def intent_node(state: CustomerServiceState) -> dict:
 
         # 降级到本地模型
         try:
-            result = agent_local.invoke({
-                "messages": [HumanMessage(content=user_input)]
-            })
+            result = agent_local.invoke(payload)
 
             data = result["structured_response"].model_dump()
 

@@ -22,7 +22,7 @@ class WindowMemory:
             socket_timeout=3,
             decode_responses=True,
         )
-        # 窗口保留轮数,生产环境默认 40
+        # 窗口保留条数，读 .env 的 WINDOW_MEMORY_ROUNDS
         self.window_size = int(os.getenv("WINDOW_MEMORY_ROUNDS", 40))
         self.session_id = session_id
         self.key = f"customer_window:{self.session_id}"
@@ -38,7 +38,7 @@ class WindowMemory:
         msg = json.dumps(data, ensure_ascii=False)
         pipe = self.redis.pipeline()  # 创建一个管道，用于将多个命令打包在一起发送给Redis服务器
         pipe.rpush(self.key, msg)  # 将数据添加到列表的末尾
-        pipe.ltrim(self.key, -self.window_size, -1)  # 修剪列表，只保留指定范围内的元素
+        pipe.ltrim(self.key, -self.window_size, -1)  # 只保留最近 window_size 条
         pipe.expire(self.key, self.window_limit_time)  # 设置过期时间
         await pipe.execute()
 

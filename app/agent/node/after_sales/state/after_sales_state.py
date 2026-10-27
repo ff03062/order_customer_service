@@ -28,7 +28,7 @@ class AfterSalesState(TypedDict):
     order_context: str           # 上一轮在聊什么
 
     # === 意图与槽位 ===
-    intent: str                  # 二级售后意图，见 schema.INTENT_OPTIONS
+    intent: str                  # 二级售后意图，见 schema.INTENT_LABELS
     intent_confidence: float
     rewritten_input: str         # 指代消解后的问题
     facts: dict                  # 从对话抽取的事实（用户口述）

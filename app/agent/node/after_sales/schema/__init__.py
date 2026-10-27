@@ -1,11 +1,10 @@
 from app.agent.node.after_sales.schema.after_sales_schema import (
-    INTENT_OPTIONS,
     INTENT_LABELS,
     REQUIRED_SLOTS,
     SLOT_QUESTIONS,
     SLOT_LABELS,
-    USER_FACT_SLOTS,
     POLICY_ONLY_INTENTS,
+    MAX_CLARIFY,
     ORDER_STATUS_MAP,
     AFTER_SALES_TYPE_MAP,
     AFTER_SALES_STATUS_MAP,
@@ -16,17 +15,15 @@ from app.agent.node.after_sales.schema.after_sales_schema import (
     freight_note,
     missing_required_slots,
     apply_existing_after_sales,
-    clarify_question_for,
 )
 
 __all__ = [
-    "INTENT_OPTIONS",
     "INTENT_LABELS",
     "REQUIRED_SLOTS",
     "SLOT_QUESTIONS",
     "SLOT_LABELS",
-    "USER_FACT_SLOTS",
     "POLICY_ONLY_INTENTS",
+    "MAX_CLARIFY",
     "ORDER_STATUS_MAP",
     "AFTER_SALES_TYPE_MAP",
     "AFTER_SALES_STATUS_MAP",
@@ -37,5 +34,4 @@ __all__ = [
     "freight_note",
     "missing_required_slots",
     "apply_existing_after_sales",
-    "clarify_question_for",
 ]

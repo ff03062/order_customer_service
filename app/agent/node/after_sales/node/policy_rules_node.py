@@ -3,7 +3,7 @@
 职责：政策检索 + 规则判定（确定性判定的落点）
 
 流程：
-    ① 政策检索（向量 + BM25 + RRF，命中即记录 clause_id 作为决策依据）
+    ① 政策检索（两跳：第一跳不够时由 LLM 判定并给出补充检索词）
     ② 遍历规则表，按 cond 判断适用性、按 check 判定通过与否
     ③ 合并规则结果，若出现「规则无法直接定论」的场景则标记冲突，交给 LLM
 
@@ -14,8 +14,15 @@
 
 输入：intent / facts / order_facts / rewritten_input
 输出：policy_clauses / policy_basis / rule_result / decision /
-      conflict_detected / conflict_type / need_execute / execute_payload
+      conflict_detected / conflict_type
+
+注意：这个节点**不决定要不要执行、也不生成执行参数**。
+     执行动作统一由 solution_generate_node 在最终决策确定之后算一次，
+     两处各算一遍只会算出两个不一样的结论。
 """
+from pydantic import BaseModel, Field
+
+from app.agent.node.after_sales.common import structured_call
 from app.tool.policy_retrieval_tool import search_clauses, format_clauses
 from app.agent.node.after_sales.schema import (
     RULES,
@@ -23,26 +30,6 @@ from app.agent.node.after_sales.schema import (
     freight_note,
     INTENT_LABELS,
 )
-
-# 需要触发执行动作的决策
-EXECUTE_ACTIONS = {
-    "approve_return": "create_ticket",
-    "approve_exchange": "create_ticket",
-    "approve_repair": "create_ticket",
-    "notify_existing": "notify",
-    "reject_or_convert": None,
-}
-
-# 决策 → 对用户的话术前缀
-ACTION_TEXT = {
-    "approve_return": "可以为您办理退货",
-    "approve_exchange": "可以为您办理换货",
-    "approve_repair": "可以为您安排维修",
-    "reject": "这笔订单暂时不支持该售后申请",
-    "reject_or_convert": "这笔订单无法直接办理退货",
-    "notify_existing": "这笔订单已经有一笔售后申请在处理中",
-    "consult": "需要进一步确认",
-}
 
 
 def _build_query(state: dict) -> str:
@@ -56,6 +43,48 @@ def _build_query(state: dict) -> str:
     if facts.get("damage_desc"):
         parts.append(str(facts["damage_desc"]))
     return " ".join(p for p in parts if p)
+
+
+class _HopJudge(BaseModel):
+    """第二跳的判定结果。"""
+
+    enough: bool = Field(description="第一跳条款是否已足够回答用户问题")
+    next_query: str = Field(default="", description="不足时给出补充检索词，否则留空")
+
+
+_HOP_PROMPT = """判断下面的售后政策检索结果是否够用。
+
+【用户问题】{query}
+【已命中条款】
+{hit}
+
+如果这些条款已经能回答用户问题，enough 为 true、next_query 留空。
+如果不够，enough 为 false，并给出一个更具体的中文检索词 next_query（补充商品类型、售后场景等）。
+
+只输出一个 json 对象：
+{{"enough": true, "next_query": ""}}"""
+
+
+def _retrieve_clauses(query: str, top_k: int = 3) -> list[dict]:
+    """
+    两跳检索。
+
+    第一跳命中条数已满 top_k 就直接返回；否则让 LLM 判断覆盖度，
+    不够就按它给的检索词再检一次，合并去重。
+    """
+    clauses = search_clauses(query, top_k=top_k)
+    if len(clauses) >= top_k:
+        return clauses
+
+    hit = "\n".join(f"[{c['clause_id']}] {c['title']}" for c in clauses) or "（无）"
+    judge = structured_call(_HopJudge, _HOP_PROMPT.format(query=query, hit=hit))
+    if judge is None or judge.enough or not judge.next_query:
+        return clauses
+
+    extra = search_clauses(judge.next_query, top_k=top_k)
+    print(f"[policy_rules] 第二跳 {judge.next_query!r} → {[c['clause_id'] for c in extra]}")
+    seen = {c["clause_id"] for c in clauses}
+    return (clauses + [c for c in extra if c["clause_id"] not in seen])[:top_k]
 
 
 def _existing_after_sales_state(state: dict) -> dict | None:
@@ -88,14 +117,6 @@ def _existing_after_sales_state(state: dict) -> dict | None:
             f"{'，描述：' + reason_text if reason_text else ''}）"
         ],
     }
-    payload = {
-        "tool": "notify",
-        "action": "notify_existing",
-        "order_id": str(order_facts.get("order_id") or ""),
-        "user_id": str(state.get("user_id") or ""),
-        "reason_code": "EXISTING_AFTER_SALES",
-    }
-
     print(
         f"[policy_rules] 已有售后单短路：type={existing.get('type_text')} "
         f"desc={reason_text} → notify_existing"
@@ -109,8 +130,6 @@ def _existing_after_sales_state(state: dict) -> dict | None:
         "decision": decision,
         "conflict_detected": False,
         "conflict_type": "existing_after_sales",
-        "need_execute": True,
-        "execute_payload": payload,
     }
 
 
@@ -122,38 +141,30 @@ def policy_rules_node(state: dict) -> dict:
         return shortcut
 
     # ---------- ① 政策检索 ----------
-    try:
-        clauses = search_clauses(_build_query(state), top_k=3)
-    except Exception as e:
-        print(f"[policy_rules] 政策检索失败(已忽略): {e}")
-        clauses = []
+    clauses = _retrieve_clauses(_build_query(state), top_k=3)
     policy_text = format_clauses(clauses)
     print(f"[policy_rules] 命中政策条款: {[c['clause_id'] for c in clauses]}")
 
     # ---------- ② 规则判定 ----------
     results = []
     for rule in RULES:
-        try:
-            if not rule["cond"](state):
-                results.append({"id": rule["id"], "name": rule["name"], "skipped": True})
-                continue
-            passed = bool(rule["check"](state))
-            outcome = rule["pass"] if passed else rule["fail"]
-            results.append({
-                "id": rule["id"],
-                "name": rule["name"],
-                "skipped": False,
-                "decision": "pass" if passed else "fail",
-                "result": outcome or {},
-                # 信息型规则 fail 时仍要拿到 pass 的业务字段（如运费补偿额度）
-                "pass_result": rule.get("pass") or {},
-                "informational": bool(rule.get("informational")),
-                # 只有硬规则的 fail 才算冲突，信息型规则不触发 LLM 复核
-                "conflict": rule.get("conflict") if (not passed and not rule.get("informational")) else None,
-                "basis": rule.get("basis") or [],
-            })
-        except Exception as e:
-            print(f"[policy_rules] 规则 {rule['id']} 执行异常(已跳过): {e}")
+        if not rule["cond"](state):
+            results.append({"id": rule["id"], "name": rule["name"], "skipped": True})
+            continue
+        passed = bool(rule["check"](state))
+        results.append({
+            "id": rule["id"],
+            "name": rule["name"],
+            "skipped": False,
+            "decision": "pass" if passed else "fail",
+            "result": (rule["pass"] if passed else rule["fail"]) or {},
+            # 信息型规则 fail 时仍要拿到 pass 的业务字段（如运费补偿额度）
+            "pass_result": rule.get("pass") or {},
+            "informational": bool(rule.get("informational")),
+            # 只有硬规则的 fail 才算冲突，信息型规则不触发 LLM 复核
+            "conflict": rule.get("conflict") if (not passed and not rule.get("informational")) else None,
+            "basis": rule.get("basis") or [],
+        })
 
     # ---------- ③ 合并结果 + 冲突检测 ----------
     decision = combine_decisions(results, order_facts)
@@ -192,26 +203,9 @@ def policy_rules_node(state: dict) -> dict:
         if c["clause_id"] not in basis:
             basis.append(c["clause_id"])
 
-    # ---------- ④ 需要执行的场景 ----------
-    action = decision.get("action", "consult")
-    tool = EXECUTE_ACTIONS.get(action)
-    need_execute = bool(tool)
-    execute_payload = {}
-    if need_execute:
-        facts = state.get("facts") or {}
-        execute_payload = {
-            "tool": tool,
-            "order_id": str(facts.get("order_id") or order_facts.get("order_id") or ""),
-            "action": action,
-            "refund_amount": decision.get("refund_amount", 0.0),
-            "freight_compensation": decision.get("freight_compensation", 0.0),
-            "reason_code": decision.get("reason_code", ""),
-            "clause_ids": basis[:3],
-        }
-
+    # ---------- ④ 冲突标记 ----------
     print(
-        f"[policy_rules] action={action} conflict={conflict_detected}"
-        f"({conflict_type}) need_execute={need_execute}"
+        f"[policy_rules] action={action} conflict={conflict_detected}({conflict_type})"
     )
 
     return {
@@ -222,6 +216,4 @@ def policy_rules_node(state: dict) -> dict:
         "decision": decision,
         "conflict_detected": conflict_detected,
         "conflict_type": conflict_type,
-        "need_execute": need_execute,
-        "execute_payload": execute_payload,
     }

@@ -1,14 +1,8 @@
 """
 售后政策检索工具（条款级）
 
-改造要点（相对旧版把 7 条政策硬编码在 Python 里）：
-    1. 政策来源改为 data/policies/after_sales_policy.md —— 改文档即生效，无需改代码
-    2. 按 Markdown 标题切成「条款」（clause），每条带 clause_id，便于回答时引用依据
-    3. 保留原有的「向量检索 + BM25 + RRF 融合」三件套，只把粒度从整篇改成条款
-
-对外接口：
+对外接口就两个：
     search_clauses(query, top_k)   → list[dict]  给程序调用（结构化）
-    search(query, top_k)           → list[tuple] 兼容旧调用（文本 + 分数）
     format_clauses(clauses)        → str         给 Prompt 用的文本
 """
 import os
@@ -20,11 +14,15 @@ from rank_bm25 import BM25Okapi
 
 load_dotenv()
 
+# 条款标题必须长这样：`## POLICY-01 退货政策`。
+# 编号写在文档里，而不是按出现顺序 `POLICY-{n}` 推导 ——
+# 推导的版本一旦有人调整章节顺序，所有规则引用的依据就全错位了（真踩过）。
+CLAUSE_HEADING = re.compile(r"^##\s+(POLICY-\d+)\s+(.+)$")
+
 # 政策文档路径（app/tool/ -> ../../data/policies/）
 _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-POLICY_DOC_PATH = os.getenv(
-    "POLICY_DOC_PATH",
-    os.path.join(_PROJECT_ROOT, "data", "policies", "after_sales_policy.md"),
+POLICY_DOC_PATH = os.path.join(
+    _PROJECT_ROOT, "data", "policies", "after_sales_policy.md"
 )
 
 # 召回阈值：向量用余弦相似度（0~1，0.7 合理）；
@@ -57,8 +55,9 @@ def _load_clauses() -> list[dict]:
     把政策 md 按标题切分成条款列表。
 
     切分规则：
-        - `## 一级标题` 开启新条款
+        - `## POLICY-XX 标题` 开启新条款，编号从标题里读
         - `### 二级标题` 作为该条款的子节，保留在正文中
+        - 总标题 `# xxx` 跳过
 
     返回：[{"clause_id": "POLICY-01", "title": "退货政策", "text": "..."}]
     """
@@ -66,34 +65,34 @@ def _load_clauses() -> list[dict]:
     if _CLAUSES is not None:
         return _CLAUSES
 
-    clauses: list[dict] = []
-    if not os.path.exists(POLICY_DOC_PATH):
-        print(f"[policy] 政策文档不存在：{POLICY_DOC_PATH}")
-        _CLAUSES = clauses
-        return _CLAUSES
-
     with open(POLICY_DOC_PATH, "r", encoding="utf-8") as f:
         lines = f.read().splitlines()
 
+    clauses: list[dict] = []
+    current_id = None
     current_title = None
     buffer: list[str] = []
 
     def flush():
-        if current_title and buffer:
+        if current_id and buffer:
             body = _strip_markdown("\n".join(buffer))
             if body:
                 clauses.append({
-                    "clause_id": f"POLICY-{len(clauses) + 1:02d}",
+                    "clause_id": current_id,
                     "title": current_title,
                     "text": body,
                 })
 
     for line in lines:
-        if line.startswith("## "):           # 一级条款
+        if line.startswith("## "):
+            matched = CLAUSE_HEADING.match(line)
+            if not matched:
+                # 静默跳过会让条款内容被塞进上一条，检索结果悄悄错位 —— 直接报错
+                raise ValueError(f"条款标题缺少编号（应形如 '## POLICY-01 退货政策'）：{line}")
             flush()
-            current_title = line[3:].strip()
+            current_id, current_title = matched.group(1), matched.group(2).strip()
             buffer = []
-        elif line.startswith("# "):          # 文档总标题，跳过
+        elif line.startswith("# "):
             continue
         else:
             if current_title is not None:
@@ -112,30 +111,18 @@ def _load_clauses() -> list[dict]:
 def _ensure_index():
     global _BM25_INDEX, _EMBEDDING_MODEL, _DOC_VECTORS
 
-    clauses = _load_clauses()
-    if not clauses:
+    if _BM25_INDEX is not None:
         return
 
-    if _BM25_INDEX is None:
-        _BM25_INDEX = BM25Okapi([list(jieba.cut(c["text"])) for c in clauses])
+    from sentence_transformers import SentenceTransformer
 
-    if _EMBEDDING_MODEL is None:
-        model_path = os.getenv("EMBEDDING_MODEL_PATH")
-        try:
-            from sentence_transformers import SentenceTransformer
-            _EMBEDDING_MODEL = SentenceTransformer(model_path)
-        except Exception as e:
-            print(f"[policy] 向量模型加载失败，降级为纯 BM25 检索: {e}")
-            _EMBEDDING_MODEL = False   # False 表示「已尝试但失败」
-
-    if _DOC_VECTORS is None:
-        if _EMBEDDING_MODEL:
-            _DOC_VECTORS = [
-                _EMBEDDING_MODEL.encode([c["text"]], normalize_embeddings=True)
-                for c in clauses
-            ]
-        else:
-            _DOC_VECTORS = []
+    clauses = _load_clauses()
+    _BM25_INDEX = BM25Okapi([list(jieba.cut(c["text"])) for c in clauses])
+    _EMBEDDING_MODEL = SentenceTransformer(os.getenv("EMBEDDING_MODEL_PATH"))
+    _DOC_VECTORS = [
+        _EMBEDDING_MODEL.encode([c["text"]], normalize_embeddings=True)
+        for c in clauses
+    ]
 
 
 # ============================================================
@@ -146,8 +133,6 @@ def vector_search(query: str, top_k: int = 3) -> list[tuple[str, float]]:
     """向量检索：返回 (clause_id, 相似度) 列表。"""
     _ensure_index()
     clauses = _load_clauses()
-    if not _EMBEDDING_MODEL or not _DOC_VECTORS:
-        return []
 
     query_vec = _EMBEDDING_MODEL.encode([query], normalize_embeddings=True)
     results = []
@@ -163,8 +148,6 @@ def bm25_search(query: str, top_k: int = 3) -> list[tuple[str, float]]:
     """BM25 检索：返回 (clause_id, 分数) 列表。"""
     _ensure_index()
     clauses = _load_clauses()
-    if not _BM25_INDEX:
-        return []
 
     scores = _BM25_INDEX.get_scores(list(jieba.cut(query)))
     results = []
@@ -196,22 +179,15 @@ def rrf_fusion(
 # ============================================================
 
 def search_clauses(query: str, top_k: int = 3) -> list[dict]:
-    """
-    条款级检索入口。
-
-    返回：[{"clause_id", "title", "text", "score"}]
-    两路都召回不到时降级为「标题字面命中」，仍无结果则返回空列表。
-    """
+    """条款级检索入口，返回 [{"clause_id", "title", "text", "score"}]。"""
     clauses = _load_clauses()
-    if not clauses:
-        return []
-
     by_id = {c["clause_id"]: c for c in clauses}
+
     vec = vector_search(query, top_k=top_k)
     bm25 = bm25_search(query, top_k=top_k)
 
     if not vec and not bm25:
-        # 字面兜底：查询词直接出现在条款标题里
+        # 两路都低于阈值（短查询 / 口语化说法）：退回标题字面命中
         hits = [
             c for c in clauses
             if any(tok and len(tok) > 1 and tok in c["title"] for tok in jieba.cut(query))
@@ -219,16 +195,7 @@ def search_clauses(query: str, top_k: int = 3) -> list[dict]:
         return [{**c, "score": 0.0} for c in hits[:top_k]]
 
     fused = rrf_fusion(vec, bm25)[:top_k]
-    return [
-        {**by_id[doc_id], "score": round(score, 6)}
-        for doc_id, score in fused
-        if doc_id in by_id
-    ]
-
-
-def search(query: str, top_k: int = 3) -> list[tuple[str, float]]:
-    """兼容旧接口：返回 [(条款纯文本, 分数)]。"""
-    return [(c["text"], c["score"]) for c in search_clauses(query, top_k)]
+    return [{**by_id[doc_id], "score": round(score, 6)} for doc_id, score in fused]
 
 
 def format_clauses(clauses: list[dict]) -> str:

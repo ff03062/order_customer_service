@@ -28,6 +28,7 @@ class LongMemory:
                 ids=[doc_id],
                 documents=[content],
                 metadatas=[{"user_id": user_id}],
+
             ),
         )
 

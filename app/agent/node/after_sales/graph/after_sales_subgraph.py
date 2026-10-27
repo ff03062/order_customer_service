@@ -5,7 +5,7 @@
     from app.agent.node.after_sales.graph.after_sales_subgraph import AfterSalesSubGraph
 
     subgraph = AfterSalesSubGraph()
-    result = subgraph.invoke({
+    result = subgraph.agent.invoke({
         "user_input": "这单我要退货，已经拆封了但有质量问题",
         "user_id": "1",
         "chat_history": [...],            # 可选
@@ -18,13 +18,14 @@
       ↓
     intent_slot_node          ① 二级意图 + 槽位抽取（LLM + 结构化输出）
       │
+      ├─ 纯政策咨询（无需订单） ─────────────────┐
       ├─ 缺必需槽位/低置信度 → clarify_node → END（等用户补充）
-      ↓
+      ↓                                          │
     order_facts_node          ② 事实聚合（参数化查询，0 次 LLM）
-      │
+      │                                          │
       ├─ 订单号缺失/订单不存在 → clarify_node → END
-      ↓
-    policy_rules_node         ③ 政策检索 + 规则判定
+      ↓                                          │
+    policy_rules_node         ③ 政策检索(RAG) + 规则判定 ←┘
       │
       ├─ 命中冲突 → llm_reasoning_node ④ 灰区推理（规则↔LLM 无回边，不会死循环）
       │                    │
@@ -32,12 +33,13 @@
       │                    ↓
       └────────────────────┴→ solution_generate_node ⑤ 生成答复 + 锁定执行动作
                                  │
-                                 ├─ 需执行 → action_execute_node ⑥ MCP 桩 → END
+                                 ├─ 需执行 → action_execute_node ⑥ → END
                                  └─ 仅告知 → END
 """
 from langgraph.graph import StateGraph, START, END
 
 from app.agent.node.after_sales.state import AfterSalesState
+from app.agent.node.after_sales.schema import MAX_CLARIFY, POLICY_ONLY_INTENTS
 from app.agent.node.after_sales.node import (
     intent_slot_node,
     order_facts_node,
@@ -47,7 +49,6 @@ from app.agent.node.after_sales.node import (
     clarify_node,
     action_execute_node,
 )
-from app.agent.node.after_sales.node.clarify_node import MAX_CLARIFY
 from app.agent.node.after_sales.node.order_facts_node import has_order_facts
 
 
@@ -61,6 +62,11 @@ def _need_clarify(state: dict) -> bool:
 
 
 def _route_after_intent_slot(state: dict) -> str:
+    # 纯政策咨询（如"定制商品能退吗"）压根不需要订单，
+    # 直接走政策检索；否则会被下面的 order_facts_node 当成"缺订单号"反问，
+    # 用户明明是问政策，却被要求报订单号。
+    if state.get("intent") in POLICY_ONLY_INTENTS:
+        return "policy_rules_node"
     if state.get("need_clarify") and _need_clarify(state):
         return "clarify_node"
     return "order_facts_node"
@@ -109,11 +115,10 @@ def _route_after_solution(state: dict) -> str:
 class AfterSalesSubGraph:
     """售后决策子图（规则引擎 + LLM 混合决策）。"""
 
-    def __init__(self, checkpoint=None):
-        self.memory = checkpoint
-        self.agent = self.get_agent()
+    def __init__(self):
+        self.agent = self._build()
 
-    def get_agent(self):
+    def _build(self):
         graph = StateGraph(AfterSalesState)
 
         graph.add_node("intent_slot_node", intent_slot_node)
@@ -129,7 +134,11 @@ class AfterSalesSubGraph:
         graph.add_conditional_edges(
             "intent_slot_node",
             _route_after_intent_slot,
-            {"clarify_node": "clarify_node", "order_facts_node": "order_facts_node"},
+            {
+                "clarify_node": "clarify_node",
+                "order_facts_node": "order_facts_node",
+                "policy_rules_node": "policy_rules_node",
+            },
         )
 
         graph.add_conditional_edges(
@@ -169,16 +178,9 @@ class AfterSalesSubGraph:
         graph.add_edge("clarify_node", END)
         graph.add_edge("action_execute_node", END)
 
-        self.agent = graph.compile()
-        return self.agent
+        return graph.compile()
 
     # ---------- 对外调用 ----------
-
-    def invoke(self, inputs: dict) -> dict:
-        return self.agent.invoke(inputs)
-
-    async def ainvoke(self, inputs: dict) -> dict:
-        return await self.agent.ainvoke(inputs)
 
     def draw(self, filename: str = "after_sales_subgraph.png"):
         data = self.agent.get_graph().draw_mermaid_png()

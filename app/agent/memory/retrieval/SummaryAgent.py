@@ -12,7 +12,7 @@ from app.agent.memory.save.summary_memory import SummaryMemory
 
 class SummaryAgent:
     def __init__(self, summary_memory: SummaryMemory):
-        self.model = MyModel.get_local_model()
+        self.model = MyModel.get_model()
         self.prompt = self.get_prompt()
         self.agent = self.get_agent()
         self.summary_memory = summary_memory

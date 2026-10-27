@@ -12,7 +12,7 @@ from app.agent.memory.save.long_memory import LongMemory
 
 class LongAgent:
     def __init__(self, long_memory: LongMemory):
-        self.model = MyModel.get_local_model()
+        self.model = MyModel.get_model()
         self.prompt = self.get_prompt()
         self.agent = self.get_agent()
         self.long_memory = long_memory

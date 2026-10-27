@@ -33,6 +33,6 @@ class SessionManager:
         await self.window_memory.save(role, content)
 
     # 给提示词构建器写的构建方法
-    async def build_prompt(self, user_id, question: str) -> dict:
-        prompt = await self.prompt_builder.builder_prompt(user_id, question)
-        return {"role": "system", "content": prompt}
+    async def build_prompt(self, user_id, question: str) -> str:
+        """返回拼好的记忆上下文（纯文本）。调用方决定放哪，这里不掺和消息结构。"""
+        return await self.prompt_builder.builder_prompt(user_id, question)

@@ -1,6 +1,7 @@
 """
 LangGraph 图定义
 """
+import asyncio
 import contextlib
 import json
 import os
@@ -14,12 +15,10 @@ from app.agent.node.manager_node import manager_node
 from app.agent.node.intent_node import intent_node
 from app.agent.node.order_node import order_node
 from app.agent.node.after_sales_node import after_sales_node
-from app.agent.node.chat_node import chat_node_stream
+from app.agent.node.chat_node import chat_node
 from app.agent.memory.manager import SessionManager, MemoryManager
 
 FALLBACK_MSG = "抱歉，我这边暂时遇到了一点问题，已为您切换到对话模式，请换个方式告诉我您想了解什么～"
-TEST_SESSION_ID = os.getenv("TEST_SESSION_ID", "111")  # docs 测试用，可由环境变量覆盖
-
 
 def order_node_with_fallback(state: CustomerServiceState):
     """order 节点异常时跳 chat。"""
@@ -36,10 +35,14 @@ def order_node_with_fallback(state: CustomerServiceState):
         )
 
 
-def after_sales_node_with_fallback(state: CustomerServiceState):
-    """after_sales 节点异常时跳 chat。"""
+async def after_sales_node_with_fallback(state: CustomerServiceState):
+    """
+    售后节点异常时跳 chat。
+    必须是 async：节点内部要调支付宝 MCP（网络请求）。
+    LangGraph 会自动识别协程函数，主图用 astream 调用时无需额外改动。
+    """
     try:
-        result = after_sales_node(state)
+        result = await after_sales_node(state)
         return Command(update=result, goto=END)
     except Exception as e:
         import traceback
@@ -64,7 +67,7 @@ class CustomerServiceGraph:
         graph.add_node("intent", intent_node)
         graph.add_node("order", order_node_with_fallback)
         graph.add_node("after_sales", after_sales_node_with_fallback)
-        graph.add_node("chat", chat_node_stream)
+        graph.add_node("chat", chat_node)
 
         graph.add_edge(START, "intent")
         graph.add_edge("intent", "manager")
@@ -107,39 +110,33 @@ class CustomerServiceGraph:
         return False, "会话id为空"
 
     async def chat(self, question, user_id, session_id):
-        # -----------------------添加记忆-------------------------
-        # 创建会话管理器
+        # -----------------------本轮记忆上下文-------------------------
+        # 记忆构建失败时本轮无记忆，不打断对话
         session_manager = SessionManager(session_id, user_id)
-        # 记忆构建失败时降级为纯对话,不能打断主流程
         try:
-            # 添加窗口记忆
             await session_manager.save("user", question)
-            # 构建记忆的提示词
-            memory_prompt = await session_manager.build_prompt(user_id, question)
+            memory_context = await session_manager.build_prompt(user_id, question)
         except Exception as e:
-            print(f"[memory] 构建记忆失败,降级为无记忆对话: {e}")
-            memory_prompt = ""
-
+            print(f"[memory] 构建记忆失败，本轮无记忆: {type(e).__name__}: {e}")
+            memory_context = ""
 
         ai_answer = ""
         # 构建用户问题
         #
         # 注意（查询层状态共享）：
-        #   这里只传 messages / user_id / user_email。
+        #   这里只传 messages / user_id / user_email / memory_context。
         #   current_order_id、order_context 等字段都是「无 reducer 的标量通道」，
         #   本轮输入里没有它们时，LangGraph 会保留上一轮 checkpoint 的值 —— 
         #   这正是订单/售后子图能在下一轮拿到「上一笔订单」的原因。
         #   反过来说：不能在这里把它们写成默认空字符串，否则会覆盖掉上一轮的实体。
         #
-        # 记忆构建失败时 memory_prompt 为空串，不能塞进 messages（会污染消息列表）
-        messages = [HumanMessage(content=question)]
-        if memory_prompt:
-            messages.insert(0, memory_prompt)
-
+        # 记忆上下文走独立的 memory_context 通道，不塞进 messages：
+        #   messages 是被 Checkpointer 持久化的对话回合，塞进去会每轮重复一份、越滚越大。
         user_msg = {
-            "messages": messages,
+            "messages": [HumanMessage(content=question)],
             "user_id": user_id,
             "user_email": "",
+            "memory_context": memory_context,
         }
         # 配置检测点
         config = {"configurable": {"thread_id": session_id}}
@@ -163,16 +160,17 @@ class CustomerServiceGraph:
             print(f"错误:{e}\n{traceback.format_exc()}")
             yield str(e)
         # ---------------------更新记忆---------------------------
-        # 记忆更新同样降级处理,不影响已产出的回答
+        # 放后台跑：它要连调 3 次 LLM（长期/画像/摘要）。若在这里 await，
+        # 前端得等它跑完才收到 done 事件，输入框会一直处于锁定状态。
+        asyncio.create_task(self._update_memory(session_manager, user_id, question, ai_answer))
+
+    async def _update_memory(self, session_manager, user_id, question, ai_answer):
+        """后台更新三层记忆。失败只记日志，不影响已经返给用户的答复。"""
         try:
-            # 添加AI回复的记忆
             await session_manager.save("ai", ai_answer)
-            # 更新记忆(记忆管理器里面传的是会话管理器对象)
-            memory_manger = MemoryManager(session_manager)
-            await memory_manger.update(user_id, question)
+            await MemoryManager(session_manager).update(user_id, question)
         except Exception as e:
-            print(f"[memory] 更新记忆失败(已忽略): {e}")
-        # ------------------------------------------------
+            print(f"[memory] 更新记忆失败: {type(e).__name__}: {e}")
 
     """
      会话锁：同一 session 同一时刻只允许一个请求进入。

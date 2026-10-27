@@ -1,6 +1,10 @@
 """
-订单查询子图的 Schema 配置：表结构、意图映射、状态码。
+订单查询子图的 Schema 配置：意图映射、字段注释、状态码。
 供各节点复用。
+
+注意：这里只保留**渲染实际用到**的那一份字段定义（`FIELD_HINTS`）。
+原来还有一份 `TABLES_SCHEMA`（同样内容、不同写法），既没有任何地方引用，
+注释还和 `FIELD_HINTS` 不一致（`categories.parent_id` 少了"0=顶级"），已删除。
 """
 
 # ===== 意图选项 =====
@@ -20,56 +24,6 @@ STATUS_MAP = (
     "after_sales.type：1质量问题 2退货 3换货 4维修\n"
     "after_sales.status：0待处理 1处理中 2已完成 3已拒绝"
 )
-
-# ===== 完整表 schema：table_name -> 字段定义片段 =====
-TABLES_SCHEMA: dict[str, str] = {
-    "orders": """\
-- order_id     BIGINT UNSIGNED  订单ID（主键）
-- user_id      BIGINT UNSIGNED  用户ID
-- status       TINYINT          订单状态：0待支付 1已支付 2已发货 3已取消 4售后中 5已完成
-- total_amount DECIMAL(10,2)    订单总金额
-- pay_amount   DECIMAL(10,2)    实付金额
-- created_at   DATETIME         下单时间""",
-
-    "order_items": """\
-- id           BIGINT UNSIGNED  明细ID
-- order_id     BIGINT UNSIGNED  订单ID
-- product_id   BIGINT UNSIGNED  商品ID
-- product_name VARCHAR(200)     下单时商品快照名
-- price        DECIMAL(10,2)    下单时单价
-- quantity     INT              购买数量
-- subtotal     DECIMAL(10,2)    小计金额""",
-
-    "logistics": """\
-- id          BIGINT UNSIGNED  物流ID
-- order_id    BIGINT UNSIGNED  订单ID
-- company     VARCHAR(50)      快递公司
-- tracking_no VARCHAR(64)      快递单号
-- status      TINYINT          物流状态：0未入库 1运输中 2已签收
-- updated_at  DATETIME         更新时间""",
-
-    "after_sales": """\
-- id          BIGINT UNSIGNED  售后ID
-- order_id    BIGINT UNSIGNED  订单ID
-- user_id     BIGINT UNSIGNED  用户ID
-- type        TINYINT          售后类型：1质量问题 2退货 3换货 4维修
-- description TEXT             问题描述
-- status      TINYINT          处理状态：0待处理 1处理中 2已完成 3已拒绝
-- created_at  DATETIME         创建时间
-- updated_at  DATETIME         更新时间""",
-
-    "products": """\
-- id          BIGINT UNSIGNED  商品ID
-- name        VARCHAR(200)     商品名称
-- category_id BIGINT UNSIGNED  分类ID
-- price       DECIMAL(10,2)    现价
-- stock       INT              库存""",
-
-    "categories": """\
-- id          BIGINT UNSIGNED  分类ID
-- name        VARCHAR(50)      分类名称
-- parent_id   BIGINT UNSIGNED  父分类ID""",
-}
 
 # ===== 意图 → 相关表 → 需要的字段 =====
 INTENT_TO_SCHEMA: dict[str, dict[str, list[str]]] = {

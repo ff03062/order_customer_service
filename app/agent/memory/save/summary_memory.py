@@ -12,6 +12,7 @@ pool = AsyncConnectionPool(
     timeout=5,
 )
 
+
 class SummaryMemory:
     """
     摘要记忆 - PostgreSQL(电商客服场景)
@@ -24,7 +25,7 @@ class SummaryMemory:
         self.session_id = session_id
 
     async def _ensure_schema(self):
-        """首次使用时幂等建表,避免 UndefinedTable 直接打断主流程。"""
+        """首次使用时幂等建表。"""
         if SummaryMemory._schema_ready:
             return
         async with pool.connection() as con:
@@ -43,47 +44,37 @@ class SummaryMemory:
         SummaryMemory._schema_ready = True
 
     async def save(self, summary: str):
-        try:
-            await self._ensure_schema()
-            async with pool.connection() as con:
-                async with con.cursor() as cur:
-                    await cur.execute(
-                        """
-                        INSERT INTO customer_conversation_summary(session_id, summary)
-                        VALUES(%s, %s)
-                        ON CONFLICT(session_id)
-                        DO UPDATE SET summary = EXCLUDED.summary, update_time = NOW()
-                        """,
-                        (self.session_id, summary),
-                    )
-                await con.commit()
-        except Exception as e:
-            print(f"[SummaryMemory.save] 写入失败(已忽略): {e}")
+        await self._ensure_schema()
+        async with pool.connection() as con:
+            async with con.cursor() as cur:
+                await cur.execute(
+                    """
+                    INSERT INTO customer_conversation_summary(session_id, summary)
+                    VALUES(%s, %s)
+                    ON CONFLICT(session_id)
+                    DO UPDATE SET summary = EXCLUDED.summary, update_time = NOW()
+                    """,
+                    (self.session_id, summary),
+                )
+            await con.commit()
 
     async def query(self):
-        try:
-            await self._ensure_schema()
-            async with pool.connection() as con:
-                async with con.cursor() as cur:
-                    await cur.execute(
-                        "SELECT summary FROM customer_conversation_summary WHERE session_id = %s",
-                        (self.session_id,),
-                    )
-                    rs = await cur.fetchone()
-                    return rs[0] if rs else ""
-        except Exception as e:
-            print(f"[SummaryMemory.query] 查询失败(已忽略): {e}")
-            return ""
+        await self._ensure_schema()
+        async with pool.connection() as con:
+            async with con.cursor() as cur:
+                await cur.execute(
+                    "SELECT summary FROM customer_conversation_summary WHERE session_id = %s",
+                    (self.session_id,),
+                )
+                rs = await cur.fetchone()
+                return rs[0] if rs else ""
 
     async def clear(self):
-        try:
-            await self._ensure_schema()
-            async with pool.connection() as con:
-                async with con.cursor() as cur:
-                    await cur.execute(
-                        "DELETE FROM customer_conversation_summary WHERE session_id = %s",
-                        (self.session_id,),
-                    )
-                await con.commit()
-        except Exception as e:
-            print(f"[SummaryMemory.clear] 删除失败(已忽略): {e}")
+        await self._ensure_schema()
+        async with pool.connection() as con:
+            async with con.cursor() as cur:
+                await cur.execute(
+                    "DELETE FROM customer_conversation_summary WHERE session_id = %s",
+                    (self.session_id,),
+                )
+            await con.commit()

@@ -38,7 +38,6 @@ COLUMN_CANDIDATES = {
     "pay_amount": ["pay_amount", "actual_amount", "payment_amount", "paid_amount"],
     "total_amount": ["total_amount", "total_price", "amount"],
     "created_at": ["created_at", "create_time", "created_time", "order_time"],
-    "receipt_time": ["deliver_time", "delivery_time", "finish_time", "updated_at", "update_time"],
 }
 
 # ===== 候选表名（不同建表脚本对明细表、分类表的命名不同）=====
@@ -179,9 +178,9 @@ def get_order_facts(order_id, user_id) -> dict:
     返回字典字段固定，供规则层与 LLM 层共同消费：
         {
           "found": bool, "order_id": str, "order_status": int,
-          "pay_amount": float, "total_amount": float, "created_at": str,
+          "pay_amount": float, "created_at": str,
           "days_since_purchase": int,
-          "is_signed": bool, "signed_source": str, "deliver_time": str,
+          "is_signed": bool, "signed_source": str,
           "days_since_receipt": int,        # 未签收时为 -1
           "categories": [str], "logistics_status": int, "has_freight_insurance": bool,
           "has_existing_after_sales": bool,
@@ -197,13 +196,10 @@ def get_order_facts(order_id, user_id) -> dict:
         "order_id": str(order_id or ""),
         "order_status": -1,
         "pay_amount": 0.0,
-        "total_amount": 0.0,
         "created_at": "",
         "days_since_purchase": -1,  # 下单距今天数（保修期判定用）
-        "deliver_time": "",
         "is_signed": False,  # 是否已签收（退货时效的第一道门）
         "signed_source": "",  # 签收判定的依据：logistics / orders.status
-        "has_received": False,
         "days_since_receipt": -1,  # 签收距今天数；未签收时为 -1
         "categories": [],
         "logistics_status": -1,  # 0未入库 1运输中 2已签收
@@ -230,7 +226,7 @@ def get_order_facts(order_id, user_id) -> dict:
         return facts
 
     selected = ["order_id"]
-    for logical in ("pay_amount", "total_amount", "created_at", "receipt_time"):
+    for logical in ("pay_amount", "total_amount", "created_at"):
         picked = _pick_fuzzy(COLUMN_CANDIDATES[logical], columns)
         if picked and picked not in selected:
             selected.append(picked)
@@ -269,8 +265,10 @@ def get_order_facts(order_id, user_id) -> dict:
         except (TypeError, ValueError):
             return 0.0
 
-    facts["pay_amount"] = to_float(value_of("pay_amount")) or to_float(value_of("total_amount"))
-    facts["total_amount"] = to_float(value_of("total_amount")) or facts["pay_amount"]
+    # 退款金额按实付算；pay_amount 取不到（或为 0）时退回订单总额
+    facts["pay_amount"] = (
+        to_float(value_of("pay_amount")) or to_float(value_of("total_amount"))
+    )
 
     created_at = value_of("created_at")
     facts["created_at"] = str(created_at or "")
@@ -307,8 +305,6 @@ def get_order_facts(order_id, user_id) -> dict:
         # 已签收但物流没记录签收时间：用下单时间近似（结果是「偏长」，判定偏严）
         receipt_dt = purchase_dt
 
-    facts["deliver_time"] = receipt_dt.strftime("%Y-%m-%d %H:%M:%S") if receipt_dt else ""
-    facts["has_received"] = is_signed
     if receipt_dt:
         facts["days_since_receipt"] = max(0, (datetime.now() - receipt_dt).days)
     # 未签收时 days_since_receipt 保持 -1：规则层据此走「未签收可退」分支

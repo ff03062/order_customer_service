@@ -51,7 +51,7 @@ class OrderQueryState(TypedDict):
     raw_output: str              # 模型原样输出的字符串（打印到控制台）
     sql: str                     # 解析后的 SQL
     sql_attempts: Annotated[list[str], operator.add]  # 每次尝试的原始输出
-    sql_check_result: str       # "invalid_json" | "empty" | "no_user_id" | "dangerous" | "pass" | "exhausted" | ""（初始为空）
+    sql_check_result: str        # "invalid_json" | "empty" | "no_user_id" | "dangerous" | "pass" | "exhausted" | ""（初始为空）
     db_result: str               # 数据库返回的 JSON 字符串（成功时）
     db_error: str                # 检查/执行失败信息（成功时为空）
     retry_count: int             # SQL 重试次数
